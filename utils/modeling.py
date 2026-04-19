@@ -467,8 +467,9 @@ def train_model(model, train_loader, val_loader, num_epochs: int,
         output_dir (str): Local directory to save models and artifacts. Defaults to "outputs/experiments".
 
     Returns:
-        tuple[nn.Module, dict]: (best_model, history) where history contains
-            lists of train_loss, train_acc, val_loss, val_acc per epoch.
+        tuple[nn.Module, dict, str]: (best_model, history, run_output_dir) where history contains
+            lists of train_loss, train_acc, val_loss, val_acc per epoch, and run_output_dir
+            is the timestamped output directory for artifacts.
     """
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
@@ -489,8 +490,9 @@ def train_model(model, train_loader, val_loader, num_epochs: int,
     now = datetime.now()
     date_time = f"{now.day:02d}:{now.month:02d}-{now.hour:02d}:{now.minute:02d}"
 
-    # Create local output directory
-    run_output_dir = os.path.join(output_dir, run_name)
+    # Create local output directory with timestamp to avoid overwriting
+    timestamp = now.strftime("%Y%m%d_%H%M%S")
+    run_output_dir = os.path.join(output_dir, f"{run_name}_{timestamp}")
     os.makedirs(run_output_dir, exist_ok=True)
 
     # Record start time for training duration
@@ -573,7 +575,7 @@ def train_model(model, train_loader, val_loader, num_epochs: int,
             os.remove(tmp_cm_path)
             print(f"Confusion matrix saved to: {local_cm_path}")
 
-    return model, history
+    return model, history, run_output_dir
 
 
 def _plot_and_save_training_history(history: dict, filepath: str):
@@ -644,7 +646,7 @@ def _plot_and_save_confusion_matrix(labels: list, preds: list, class_names: list
 
 def evaluate_and_log(model, test_loader, device, class_names: list,
                      scheme: str, task: str, run_name: str = None,
-                     output_dir: str = "outputs/experiments"):
+                     output_dir: str = None):
     """Evaluate model on test set, log metrics to MLflow, and print report.
 
     Computes accuracy, macro F1, and classification report on the test set.
@@ -659,7 +661,7 @@ def evaluate_and_log(model, test_loader, device, class_names: list,
         scheme (str): Scheme identifier for display.
         task (str): Task identifier for display.
         run_name (str): MLflow run name for logging test metrics. If None, no MLflow logging.
-        output_dir (str): Local directory to save test confusion matrix. Defaults to "outputs/experiments".
+        output_dir (str): Local directory to save test confusion matrix (from train_model return).
 
     Returns:
         dict: Dictionary with keys 'accuracy', 'f1', 'preds', 'labels'.
@@ -686,12 +688,12 @@ def evaluate_and_log(model, test_loader, device, class_names: list,
             _plot_and_save_confusion_matrix(labels, preds, class_names, tmp_cm_path)
             mlflow.log_artifact(tmp_cm_path, artifact_path="plots")
 
-            run_output_dir = os.path.join(output_dir, run_name)
-            os.makedirs(run_output_dir, exist_ok=True)
-            local_cm_path = os.path.join(run_output_dir, "confusion_matrix_test.png")
-            shutil.copy2(tmp_cm_path, local_cm_path)
-            os.remove(tmp_cm_path)
-            print(f"Test confusion matrix saved to: {local_cm_path}")
+            if output_dir:
+                os.makedirs(output_dir, exist_ok=True)
+                local_cm_path = os.path.join(output_dir, "confusion_matrix_test.png")
+                shutil.copy2(tmp_cm_path, local_cm_path)
+                os.remove(tmp_cm_path)
+                print(f"Test confusion matrix saved to: {local_cm_path}")
 
     return {"accuracy": acc, "f1": f1, "preds": preds, "labels": labels}
 
