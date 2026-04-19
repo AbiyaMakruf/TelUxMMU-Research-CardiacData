@@ -298,7 +298,7 @@ def build_dataloaders(dataset, seed: int = 42, batch_size: int = 16,
     """Split dataset into train/val/test and wrap each in a DataLoader.
 
     Performs stratified splitting based on labels to maintain class balance
-    across splits.
+    across splits. Uses pin_memory=True for GPU-optimized data loading.
 
     Args:
         dataset (Dataset): PyTorch Dataset instance.
@@ -325,15 +325,15 @@ def build_dataloaders(dataset, seed: int = 42, batch_size: int = 16,
 
     train_loader = DataLoader(
         torch.utils.data.Subset(dataset, idx_train),
-        batch_size=batch_size, shuffle=True
+        batch_size=batch_size, shuffle=True, pin_memory=True, num_workers=2
     )
     val_loader = DataLoader(
         torch.utils.data.Subset(dataset, idx_val),
-        batch_size=batch_size, shuffle=False
+        batch_size=batch_size, shuffle=False, pin_memory=True, num_workers=2
     )
     test_loader = DataLoader(
         torch.utils.data.Subset(dataset, idx_test),
-        batch_size=batch_size, shuffle=False
+        batch_size=batch_size, shuffle=False, pin_memory=True, num_workers=2
     )
     return train_loader, val_loader, test_loader
 
@@ -443,13 +443,13 @@ def evaluate(model, loader, criterion, device):
 def train_model(model, train_loader, val_loader, num_epochs: int,
                 learning_rate: float, device, run_name: str,
                 scheme: str, task: str, model_name: str = "ResNet-18",
-                class_names: list = None):
+                class_names: list = None, output_dir: str = "outputs/experiments"):
     """Train a model with comprehensive MLflow logging and artifact saving.
 
     Logs hyperparameters (including model name, GPU info, date/time, training time),
     per-epoch metrics, training/validation plots, confusion matrix, and final model.
     Uses CrossEntropyLoss and Adam optimizer. Saves the best model checkpoint
-    based on validation accuracy.
+    based on validation accuracy to both MLflow (remote) and local output folder.
 
     Args:
         model (nn.Module): Model to train.
@@ -463,6 +463,7 @@ def train_model(model, train_loader, val_loader, num_epochs: int,
         task (str): Task identifier ('2class' or '4class').
         model_name (str): Human-readable model name. Defaults to "ResNet-18".
         class_names (list): Class names for confusion matrix. Defaults to None.
+        output_dir (str): Local directory to save models and artifacts. Defaults to "outputs/experiments".
 
     Returns:
         tuple[nn.Module, dict]: (best_model, history) where history contains
@@ -484,6 +485,10 @@ def train_model(model, train_loader, val_loader, num_epochs: int,
     # Get date and time in format DD:MM-HH:MM
     now = datetime.now()
     date_time = f"{now.day:02d}:{now.month:02d}-{now.hour:02d}:{now.minute:02d}"
+
+    # Create local output directory
+    run_output_dir = os.path.join(output_dir, run_name)
+    os.makedirs(run_output_dir, exist_ok=True)
 
     # Record start time for training duration
     start_time = time.time()
@@ -533,6 +538,11 @@ def train_model(model, train_loader, val_loader, num_epochs: int,
         mlflow.pytorch.log_model(model, artifact_path="model")
         mlflow.log_metric("best_val_acc", best_val_acc)
 
+        # Save model locally
+        local_model_path = os.path.join(run_output_dir, "best_model.pth")
+        torch.save(model.state_dict(), local_model_path)
+        print(f"Model saved locally to: {local_model_path}")
+
         # Log training time in HH:MM:SS format
         elapsed = time.time() - start_time
         training_time = str(datetime.timedelta(seconds=int(elapsed)))
@@ -542,7 +552,10 @@ def train_model(model, train_loader, val_loader, num_epochs: int,
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_hist:
             _plot_and_save_training_history(history, tmp_hist.name)
             mlflow.log_artifact(tmp_hist.name, artifact_path="plots")
-            os.unlink(tmp_hist.name)
+            # Save locally as well
+            local_hist_path = os.path.join(run_output_dir, "training_history.png")
+            os.rename(tmp_hist.name, local_hist_path)
+            print(f"Training history saved to: {local_hist_path}")
 
         # Log validation confusion matrix
         if class_names is not None:
@@ -551,7 +564,10 @@ def train_model(model, train_loader, val_loader, num_epochs: int,
                     best_val_labels, best_val_preds, class_names, tmp_cm.name
                 )
                 mlflow.log_artifact(tmp_cm.name, artifact_path="plots")
-                os.unlink(tmp_cm.name)
+                # Save locally as well
+                local_cm_path = os.path.join(run_output_dir, "confusion_matrix_val.png")
+                os.rename(tmp_cm.name, local_cm_path)
+                print(f"Confusion matrix saved to: {local_cm_path}")
 
     return model, history
 
@@ -623,11 +639,13 @@ def _plot_and_save_confusion_matrix(labels: list, preds: list, class_names: list
 
 
 def evaluate_and_log(model, test_loader, device, class_names: list,
-                     scheme: str, task: str, run_name: str = None):
+                     scheme: str, task: str, run_name: str = None,
+                     output_dir: str = "outputs/experiments"):
     """Evaluate model on test set, log metrics to MLflow, and print report.
 
     Computes accuracy, macro F1, and classification report on the test set.
     Logs test metrics and confusion matrix artifact to MLflow (in a nested run if run_name provided).
+    Also saves test confusion matrix locally.
 
     Args:
         model (nn.Module): Trained model.
@@ -637,6 +655,7 @@ def evaluate_and_log(model, test_loader, device, class_names: list,
         scheme (str): Scheme identifier for display.
         task (str): Task identifier for display.
         run_name (str): MLflow run name for logging test metrics. If None, no MLflow logging.
+        output_dir (str): Local directory to save test confusion matrix. Defaults to "outputs/experiments".
 
     Returns:
         dict: Dictionary with keys 'accuracy', 'f1', 'preds', 'labels'.
@@ -658,11 +677,17 @@ def evaluate_and_log(model, test_loader, device, class_names: list,
                 "test_f1_macro": f1,
             })
 
-            # Log test confusion matrix
+            # Log and save test confusion matrix locally
             with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_cm:
                 _plot_and_save_confusion_matrix(labels, preds, class_names, tmp_cm.name)
                 mlflow.log_artifact(tmp_cm.name, artifact_path="plots")
-                os.unlink(tmp_cm.name)
+
+                # Save locally as well
+                run_output_dir = os.path.join(output_dir, run_name)
+                os.makedirs(run_output_dir, exist_ok=True)
+                local_cm_path = os.path.join(run_output_dir, "confusion_matrix_test.png")
+                os.rename(tmp_cm.name, local_cm_path)
+                print(f"Test confusion matrix saved to: {local_cm_path}")
 
     return {"accuracy": acc, "f1": f1, "preds": preds, "labels": labels}
 
