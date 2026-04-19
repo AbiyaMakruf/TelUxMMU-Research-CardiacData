@@ -1,6 +1,7 @@
 import os
 import time
 import tempfile
+import shutil
 from datetime import datetime, timedelta
 import numpy as np
 import pandas as pd
@@ -552,25 +553,25 @@ def train_model(model, train_loader, val_loader, num_epochs: int,
         mlflow.log_param("training_time", training_time)
 
         # Log training history plot
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_hist:
-            _plot_and_save_training_history(history, tmp_hist.name)
-            mlflow.log_artifact(tmp_hist.name, artifact_path="plots")
-            # Save locally as well
-            local_hist_path = os.path.join(run_output_dir, "training_history.png")
-            os.rename(tmp_hist.name, local_hist_path)
-            print(f"Training history saved to: {local_hist_path}")
+        tmp_hist_path = os.path.join(tempfile.gettempdir(), f"hist_{run_name}.png")
+        _plot_and_save_training_history(history, tmp_hist_path)
+        mlflow.log_artifact(tmp_hist_path, artifact_path="plots")
+        local_hist_path = os.path.join(run_output_dir, "training_history.png")
+        shutil.copy2(tmp_hist_path, local_hist_path)
+        os.remove(tmp_hist_path)
+        print(f"Training history saved to: {local_hist_path}")
 
         # Log validation confusion matrix
         if class_names is not None:
-            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_cm:
-                _plot_and_save_confusion_matrix(
-                    best_val_labels, best_val_preds, class_names, tmp_cm.name
-                )
-                mlflow.log_artifact(tmp_cm.name, artifact_path="plots")
-                # Save locally as well
-                local_cm_path = os.path.join(run_output_dir, "confusion_matrix_val.png")
-                os.rename(tmp_cm.name, local_cm_path)
-                print(f"Confusion matrix saved to: {local_cm_path}")
+            tmp_cm_path = os.path.join(tempfile.gettempdir(), f"cm_val_{run_name}.png")
+            _plot_and_save_confusion_matrix(
+                best_val_labels, best_val_preds, class_names, tmp_cm_path
+            )
+            mlflow.log_artifact(tmp_cm_path, artifact_path="plots")
+            local_cm_path = os.path.join(run_output_dir, "confusion_matrix_val.png")
+            shutil.copy2(tmp_cm_path, local_cm_path)
+            os.remove(tmp_cm_path)
+            print(f"Confusion matrix saved to: {local_cm_path}")
 
     return model, history
 
