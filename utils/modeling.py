@@ -2,6 +2,7 @@ import os
 import time
 import tempfile
 import shutil
+import contextlib
 from datetime import datetime, timedelta
 import numpy as np
 import pandas as pd
@@ -256,18 +257,19 @@ class ECGDatasetScheme2(Dataset):
 
 
 class ECGDatasetScheme3(Dataset):
-    """PyTorch Dataset for Scheme 3: 6 limb leads + 6 precordial leads + long lead.
+    """PyTorch Dataset for Scheme 3: multi-branch input (limb / precordial / long lead).
 
-    Same channel-stacking approach as Scheme 2 but uses only the anatomically
-    grouped 13 leads (limb group, precordial group, and long lead).
+    Returns three separate tensors per sample (one per anatomical group) for use
+    with the multi-branch MultiBranchResNet18 model:
+      - tensor_limb       : (18, H, W) — 6 limb leads x 3 ch
+      - tensor_precordial : (18, H, W) — 6 precordial leads x 3 ch
+      - tensor_long       : (3,  H, W) — 1 long lead x 3 ch
 
     Args:
         records (list[tuple[dict, str]]): Output of _get_image_files_scheme3().
         task (str): '2class' or '4class'.
         image_size (int): Target image size per lead. Defaults to 224.
     """
-
-    ALL_PREFIXES = LIMB_LEAD_PREFIXES + PRECORDIAL_LEAD_PREFIXES + [LONG_LEAD_PREFIX]
 
     def __init__(self, records, task: str = "4class", image_size: int = 224):
         self.records = records
@@ -279,15 +281,21 @@ class ECGDatasetScheme3(Dataset):
 
     def __getitem__(self, idx):
         files, cls_folder = self.records[idx]
-        tensors = []
-        # Load leads in anatomical order: limb -> precordial -> long
-        for prefix in self.ALL_PREFIXES:
-            path = files.get(prefix)
-            img = Image.open(path).convert("RGB") if path else Image.new("RGB", (224, 224), 255)
-            tensors.append(self.transform(img))
-        img_tensor = torch.cat(tensors, dim=0)  # shape: (39, H, W)
         label = self.label_map[cls_folder]
-        return img_tensor, label
+
+        def _load_group(prefixes):
+            tensors = []
+            for prefix in prefixes:
+                path = files.get(prefix)
+                img = Image.open(path).convert("RGB") if path else Image.new("RGB", (224, 224), 255)
+                tensors.append(self.transform(img))
+            return torch.cat(tensors, dim=0)
+
+        tensor_limb       = _load_group(LIMB_LEAD_PREFIXES)        # (18, H, W)
+        tensor_precordial = _load_group(PRECORDIAL_LEAD_PREFIXES)   # (18, H, W)
+        tensor_long       = _load_group([LONG_LEAD_PREFIX])         # (3,  H, W)
+
+        return (tensor_limb, tensor_precordial, tensor_long), label
 
 
 # ---------------------------------------------------------------------------
@@ -343,18 +351,23 @@ def build_dataloaders(dataset, seed: int = 42, batch_size: int = 16,
 # Model Factory
 # ---------------------------------------------------------------------------
 
-def build_model(num_classes: int, in_channels: int = 3, pretrained: bool = True):
-    """Build a ResNet-18 classification model adapted for ECG input.
+def build_model(num_classes: int, in_channels: int = 3, pretrained: bool = True,
+                freeze_layers: bool = True):
+    """Build a ResNet-18 classification model adapted for ECG input (Schemes 1 & 2).
 
     Uses a pretrained ResNet-18 backbone. The first convolution layer is
     replaced when in_channels != 3 (e.g. multi-lead stacked input).
     The final FC layer is replaced to output num_classes logits.
+    Optionally freezes layer1 and layer2 to reduce overfitting on small datasets.
 
     Args:
         num_classes (int): Number of output classes (2 or 4).
         in_channels (int): Number of input channels. 3 for Scheme 1,
-            39 for Scheme 2 and 3 (13 leads x 3 channels). Defaults to 3.
+            39 for Scheme 2 (13 leads x 3 channels). Defaults to 3.
         pretrained (bool): Use ImageNet pretrained weights. Defaults to True.
+        freeze_layers (bool): If True, freeze layer1 and layer2 (first half of
+            backbone) to reduce overfitting. Only meaningful when pretrained=True.
+            Defaults to True.
 
     Returns:
         torch.nn.Module: Modified ResNet-18 model.
@@ -369,7 +382,115 @@ def build_model(num_classes: int, in_channels: int = 3, pretrained: bool = True)
         )
 
     model.fc = nn.Linear(model.fc.in_features, num_classes)
+
+    if freeze_layers:
+        for param in model.layer1.parameters():
+            param.requires_grad = False
+        for param in model.layer2.parameters():
+            param.requires_grad = False
+
     return model
+
+
+class _BranchResNet18(nn.Module):
+    """Single ResNet-18 feature extractor branch without FC head.
+
+    Used internally by MultiBranchResNet18 for Scheme 3.
+    Outputs a 512-dimensional feature vector per sample.
+
+    Args:
+        in_channels (int): Number of input channels for conv1.
+        pretrained (bool): Load ImageNet weights. Defaults to True.
+        freeze_layers (bool): Freeze layer1 and layer2. Defaults to True.
+    """
+
+    def __init__(self, in_channels: int, pretrained: bool = True,
+                 freeze_layers: bool = True):
+        super().__init__()
+        weights = models.ResNet18_Weights.IMAGENET1K_V1 if pretrained else None
+        backbone = models.resnet18(weights=weights)
+
+        if in_channels != 3:
+            backbone.conv1 = nn.Conv2d(
+                in_channels, 64, kernel_size=7, stride=2, padding=3, bias=False
+            )
+
+        if freeze_layers:
+            for param in backbone.layer1.parameters():
+                param.requires_grad = False
+            for param in backbone.layer2.parameters():
+                param.requires_grad = False
+
+        self.features = nn.Sequential(
+            backbone.conv1,
+            backbone.bn1,
+            backbone.relu,
+            backbone.maxpool,
+            backbone.layer1,
+            backbone.layer2,
+            backbone.layer3,
+            backbone.layer4,
+            backbone.avgpool,
+        )
+
+    def forward(self, x):
+        return torch.flatten(self.features(x), 1)  # (B, 512)
+
+
+class MultiBranchResNet18(nn.Module):
+    """Three-branch ResNet-18 for anatomically grouped ECG leads (Scheme 3).
+
+    Branch layout:
+      - branch_limb       : 18-channel input (6 limb leads x 3 ch)
+      - branch_precordial : 18-channel input (6 precordial leads x 3 ch)
+      - branch_long       :  3-channel input (1 long lead x 3 ch, fully pretrained)
+
+    All three 512-dim outputs are concatenated → Linear(1536, num_classes).
+    This contrasts with Scheme 2 which stacks all leads into one 39-channel
+    tensor fed to a single ResNet-18.
+
+    Args:
+        num_classes (int): Number of output classes.
+        pretrained (bool): Use ImageNet weights for each branch. Defaults to True.
+        freeze_layers (bool): Freeze layer1/layer2 of each branch. Defaults to True.
+    """
+
+    def __init__(self, num_classes: int, pretrained: bool = True,
+                 freeze_layers: bool = True):
+        super().__init__()
+        self.branch_limb       = _BranchResNet18(18, pretrained, freeze_layers)
+        self.branch_precordial = _BranchResNet18(18, pretrained, freeze_layers)
+        self.branch_long       = _BranchResNet18(3,  pretrained, freeze_layers)
+        self.classifier = nn.Linear(512 * 3, num_classes)
+
+    def forward(self, inputs):
+        t_limb, t_precordial, t_long = inputs
+        feat = torch.cat([
+            self.branch_limb(t_limb),
+            self.branch_precordial(t_precordial),
+            self.branch_long(t_long),
+        ], dim=1)  # (B, 1536)
+        return self.classifier(feat)
+
+
+def build_model_multibranch(num_classes: int, pretrained: bool = True,
+                             freeze_layers: bool = True):
+    """Construct a MultiBranchResNet18 model for Scheme 3.
+
+    Three separate ResNet-18 branches process limb leads (18ch), precordial
+    leads (18ch), and long lead (3ch) independently. Their 512-dim feature
+    vectors are concatenated and classified together. Compare with Scheme 2's
+    single ResNet-18 that receives all 39 channels stacked.
+
+    Args:
+        num_classes (int): Number of output classes (2 or 4).
+        pretrained (bool): Use ImageNet pretrained weights. Defaults to True.
+        freeze_layers (bool): Freeze layer1 and layer2 of each branch. Defaults to True.
+
+    Returns:
+        MultiBranchResNet18: Multi-branch model instance.
+    """
+    return MultiBranchResNet18(num_classes, pretrained, freeze_layers)
 
 
 # ---------------------------------------------------------------------------
@@ -378,6 +499,9 @@ def build_model(num_classes: int, in_channels: int = 3, pretrained: bool = True)
 
 def train_one_epoch(model, loader, optimizer, criterion, device):
     """Run one full training epoch over the provided DataLoader.
+
+    Supports both single-tensor input (Schemes 1 & 2) and multi-branch tuple
+    input (Scheme 3). Detects input type automatically from batch structure.
 
     Args:
         model (nn.Module): Model to train.
@@ -392,24 +516,35 @@ def train_one_epoch(model, loader, optimizer, criterion, device):
     model.train()
     total_loss, correct, total = 0.0, 0, 0
 
-    for images, labels in loader:
-        images, labels = images.to(device), labels.to(device)
+    for batch_inputs, labels in loader:
+        labels = labels.to(device)
+
+        if isinstance(batch_inputs, (list, tuple)):
+            inputs = tuple(t.to(device) for t in batch_inputs)
+            batch_size = labels.size(0)
+        else:
+            inputs = batch_inputs.to(device)
+            batch_size = inputs.size(0)
+
         optimizer.zero_grad()
-        outputs = model(images)
+        outputs = model(inputs)
         loss = criterion(outputs, labels)
         loss.backward()
         optimizer.step()
 
-        total_loss += loss.item() * images.size(0)
+        total_loss += loss.item() * batch_size
         preds = outputs.argmax(dim=1)
         correct += (preds == labels).sum().item()
-        total += images.size(0)
+        total += batch_size
 
     return total_loss / total, correct / total
 
 
 def evaluate(model, loader, criterion, device):
     """Evaluate model on a DataLoader without gradient updates.
+
+    Supports both single-tensor input (Schemes 1 & 2) and multi-branch tuple
+    input (Scheme 3). Detects input type automatically from batch structure.
 
     Args:
         model (nn.Module): Model to evaluate.
@@ -418,27 +553,40 @@ def evaluate(model, loader, criterion, device):
         device (torch.device): Device to run computation on.
 
     Returns:
-        tuple[float, float, list, list]: (average_loss, accuracy, all_preds, all_labels).
+        tuple[float, float, list, list, np.ndarray]:
+            (average_loss, accuracy, all_preds, all_labels, all_probs)
+            where all_probs has shape (N, num_classes).
     """
     model.eval()
     total_loss, correct, total = 0.0, 0, 0
-    all_preds, all_labels = [], []
+    all_preds, all_labels, all_probs = [], [], []
 
     with torch.no_grad():
-        for images, labels in loader:
-            images, labels = images.to(device), labels.to(device)
-            outputs = model(images)
-            loss = criterion(outputs, labels)
+        for batch_inputs, labels in loader:
+            labels = labels.to(device)
 
-            total_loss += loss.item() * images.size(0)
+            if isinstance(batch_inputs, (list, tuple)):
+                inputs = tuple(t.to(device) for t in batch_inputs)
+                batch_size = labels.size(0)
+            else:
+                inputs = batch_inputs.to(device)
+                batch_size = inputs.size(0)
+
+            outputs = model(inputs)
+            loss = criterion(outputs, labels)
+            probs = torch.softmax(outputs, dim=1)
+
+            total_loss += loss.item() * batch_size
             preds = outputs.argmax(dim=1)
             correct += (preds == labels).sum().item()
-            total += images.size(0)
+            total += batch_size
 
             all_preds.extend(preds.cpu().numpy())
             all_labels.extend(labels.cpu().numpy())
+            all_probs.append(probs.cpu().numpy())
 
-    return total_loss / total, correct / total, all_preds, all_labels
+    all_probs = np.concatenate(all_probs, axis=0)
+    return total_loss / total, correct / total, all_preds, all_labels, all_probs
 
 
 def train_model(model, train_loader, val_loader, num_epochs: int,
@@ -467,9 +615,10 @@ def train_model(model, train_loader, val_loader, num_epochs: int,
         output_dir (str): Local directory to save models and artifacts. Defaults to "outputs/experiments".
 
     Returns:
-        tuple[nn.Module, dict, str]: (best_model, history, run_output_dir) where history contains
-            lists of train_loss, train_acc, val_loss, val_acc per epoch, and run_output_dir
-            is the timestamped output directory for artifacts.
+        tuple[nn.Module, dict, str, str]: (best_model, history, run_output_dir, mlflow_run_id)
+            where history contains lists of train_loss, train_acc, val_loss, val_acc per epoch,
+            run_output_dir is the timestamped output directory for artifacts, and mlflow_run_id
+            is the MLflow run ID to pass to evaluate_and_log() as parent_run_id.
     """
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
@@ -498,7 +647,8 @@ def train_model(model, train_loader, val_loader, num_epochs: int,
     # Record start time for training duration
     start_time = time.time()
 
-    with mlflow.start_run(run_name=run_name):
+    with mlflow.start_run(run_name=run_name) as active_run:
+        mlflow_run_id = active_run.info.run_id
         mlflow.log_params({
             "scheme": scheme,
             "task": task,
@@ -512,7 +662,7 @@ def train_model(model, train_loader, val_loader, num_epochs: int,
 
         for epoch in range(num_epochs):
             train_loss, train_acc = train_one_epoch(model, train_loader, optimizer, criterion, device)
-            val_loss, val_acc, val_preds, val_labels = evaluate(model, val_loader, criterion, device)
+            val_loss, val_acc, val_preds, val_labels, _ = evaluate(model, val_loader, criterion, device)
 
             history["train_loss"].append(train_loss)
             history["train_acc"].append(train_acc)
@@ -575,7 +725,7 @@ def train_model(model, train_loader, val_loader, num_epochs: int,
             os.remove(tmp_cm_path)
             print(f"Confusion matrix saved to: {local_cm_path}")
 
-    return model, history, run_output_dir
+    return model, history, run_output_dir, mlflow_run_id
 
 
 def _plot_and_save_training_history(history: dict, filepath: str):
@@ -646,12 +796,15 @@ def _plot_and_save_confusion_matrix(labels: list, preds: list, class_names: list
 
 def evaluate_and_log(model, test_loader, device, class_names: list,
                      scheme: str, task: str, run_name: str = None,
-                     output_dir: str = None):
+                     output_dir: str = None, parent_run_id: str = None):
     """Evaluate model on test set, log metrics to MLflow, and print report.
 
-    Computes accuracy, macro F1, and classification report on the test set.
-    Logs test metrics and confusion matrix artifact to MLflow (in a nested run if run_name provided).
-    Also saves test confusion matrix locally.
+    Computes accuracy, macro F1, ROC-AUC, and classification report on the test set.
+    Logs test metrics and confusion matrix artifact to MLflow as a true nested run
+    under the parent training run when parent_run_id is provided.
+
+    Supports both single-tensor (Schemes 1 & 2) and multi-branch tuple (Scheme 3)
+    DataLoaders transparently via the shared evaluate() function.
 
     Args:
         model (nn.Module): Trained model.
@@ -660,42 +813,62 @@ def evaluate_and_log(model, test_loader, device, class_names: list,
         class_names (list[str]): Human-readable class names.
         scheme (str): Scheme identifier for display.
         task (str): Task identifier for display.
-        run_name (str): MLflow run name for logging test metrics. If None, no MLflow logging.
-        output_dir (str): Local directory to save test confusion matrix (from train_model return).
+        run_name (str): MLflow run name for nested eval run. If None, no MLflow logging.
+        output_dir (str): Local directory to save test confusion matrix.
+        parent_run_id (str): MLflow run_id from train_model() 4th return value.
+            When provided, reopens the parent run so this eval run is a true nested child,
+            linking train and test metrics in the MLflow UI. Defaults to None.
 
     Returns:
-        dict: Dictionary with keys 'accuracy', 'f1', 'preds', 'labels'.
+        dict: Dictionary with keys 'accuracy', 'f1', 'roc_auc', 'preds', 'labels'.
     """
     criterion = nn.CrossEntropyLoss()
-    _, acc, preds, labels = evaluate(model, test_loader, criterion, device)
+    _, acc, preds, labels, all_probs = evaluate(model, test_loader, criterion, device)
     f1 = f1_score(labels, preds, average="macro", zero_division=0)
+
+    # Compute ROC-AUC (binary: use positive class prob; multi-class: OvR macro)
+    num_classes = all_probs.shape[1]
+    try:
+        if num_classes == 2:
+            roc_auc = roc_auc_score(labels, all_probs[:, 1])
+        else:
+            roc_auc = roc_auc_score(labels, all_probs, multi_class="ovr", average="macro")
+    except ValueError:
+        roc_auc = float("nan")
 
     print(f"\n=== Test Results | {scheme} | {task} ===")
     print(f"Accuracy : {acc:.4f}")
     print(f"Macro F1 : {f1:.4f}")
+    print(f"ROC-AUC  : {roc_auc:.4f}")
     print(classification_report(labels, preds, target_names=class_names, zero_division=0))
 
     # Log test metrics to MLflow if run_name is provided
     if run_name is not None:
-        with mlflow.start_run(run_name=run_name, nested=True):
-            mlflow.log_metrics({
-                "test_accuracy": acc,
-                "test_f1_macro": f1,
-            })
+        # Reopen parent training run so this eval run is a true nested child
+        parent_ctx = (mlflow.start_run(run_id=parent_run_id)
+                      if parent_run_id is not None
+                      else contextlib.nullcontext())
 
-            # Log and save test confusion matrix locally
-            tmp_cm_path = os.path.join(tempfile.gettempdir(), f"cm_test_{run_name}.png")
-            _plot_and_save_confusion_matrix(labels, preds, class_names, tmp_cm_path)
-            mlflow.log_artifact(tmp_cm_path, artifact_path="plots")
+        with parent_ctx:
+            with mlflow.start_run(run_name=run_name, nested=True):
+                mlflow.log_metrics({
+                    "test_accuracy": acc,
+                    "test_f1_macro": f1,
+                    "test_roc_auc":  roc_auc,
+                })
 
-            if output_dir:
-                os.makedirs(output_dir, exist_ok=True)
-                local_cm_path = os.path.join(output_dir, "confusion_matrix_test.png")
-                shutil.copy2(tmp_cm_path, local_cm_path)
-                os.remove(tmp_cm_path)
-                print(f"Test confusion matrix saved to: {local_cm_path}")
+                tmp_cm_path = os.path.join(tempfile.gettempdir(), f"cm_test_{run_name}.png")
+                _plot_and_save_confusion_matrix(labels, preds, class_names, tmp_cm_path)
+                mlflow.log_artifact(tmp_cm_path, artifact_path="plots")
 
-    return {"accuracy": acc, "f1": f1, "preds": preds, "labels": labels}
+                if output_dir:
+                    os.makedirs(output_dir, exist_ok=True)
+                    local_cm_path = os.path.join(output_dir, "confusion_matrix_test.png")
+                    shutil.copy2(tmp_cm_path, local_cm_path)
+                    os.remove(tmp_cm_path)
+                    print(f"Test confusion matrix saved to: {local_cm_path}")
+
+    return {"accuracy": acc, "f1": f1, "roc_auc": roc_auc, "preds": preds, "labels": labels}
 
 
 # ---------------------------------------------------------------------------
