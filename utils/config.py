@@ -1,4 +1,9 @@
 class Config:
+    """Configuration class for ECG preprocessing pipeline.
+
+    Contains all constants and parameters used throughout the preprocessing workflow,
+    including dataset URLs, folder mappings, and coordinate definitions for image cropping.
+    """
     seed: int = 42
     data_url: str = "https://data.mendeley.com/public-api/zip/gwbz3fsgp8/download/2"
     zip_name: str = "gwbz3fsgp8-2.zip"
