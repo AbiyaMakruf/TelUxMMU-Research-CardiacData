@@ -7,8 +7,88 @@ import matplotlib.pyplot as plt
 from PIL import Image
 
 
+def _list_class_folders(data_path, exclude_text_mask=True):
+    """Get list of class folders, excluding .zip files and optionally text_mask folder.
+
+    Helper function to standardize folder listing across preprocessing functions.
+
+    Args:
+        data_path (str): Path to the data directory.
+        exclude_text_mask (bool): If True, exclude 'text_mask' folder. Defaults to True.
+
+    Returns:
+        list: List of class folder names (sorted).
+    """
+    list_folder = [f for f in os.listdir(data_path)
+                   if not f.endswith('.zip') and os.path.isdir(os.path.join(data_path, f))]
+    if exclude_text_mask:
+        list_folder = [f for f in list_folder if f != 'text_mask']
+    return sorted(list_folder)
+
+
+def _clean_and_remove_text(img_path, text_mask_raw, scale=2):
+    """Apply upscaled cleaning and text mask removal to ECG image.
+
+    Reads image, scales it up, applies adaptive threshold to extract ECG signal,
+    removes noise via connected components, then removes text using provided mask.
+
+    Args:
+        img_path (str): Path to the ECG image file.
+        text_mask_raw (np.ndarray): Grayscale text mask (from cv2.imread).
+        scale (int): Upscaling factor. Defaults to 2.
+
+    Returns:
+        np.ndarray: Cleaned ECG signal with text removed (white background, black signal).
+    """
+    img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
+    if img is None:
+        return None
+
+    img_res = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+
+    blur = cv2.GaussianBlur(img_res, (3, 3), 0)
+    binary = cv2.adaptiveThreshold(blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                   cv2.THRESH_BINARY_INV, 31, 8)
+
+    # Connected components to filter out noise: keep only large/wide components
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+    clean = np.zeros_like(binary)
+    min_area = 100 * (scale ** 2)
+    min_width = 60 * scale
+
+    for i in range(1, num_labels):
+        x, y, w, h, area = stats[i]
+        if area >= min_area or w >= min_width:
+            clean[labels == i] = 255
+
+    result = np.ones_like(clean) * 255
+    result[clean == 255] = 0
+
+    # Apply text mask: set masked areas to white (remove text)
+    mask_res = cv2.resize(text_mask_raw, (result.shape[1], result.shape[0]), interpolation=cv2.INTER_NEAREST)
+    _, mask_bin = cv2.threshold(mask_res, 127, 255, cv2.THRESH_BINARY)
+
+    kernel_text = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    mask_wide = cv2.dilate(mask_bin, kernel_text, iterations=2)
+
+    result_no_text = result.copy()
+    result_no_text[mask_wide == 255] = 255
+
+    return result_no_text
+
+
 def preview_cropped_ecg_area(data_path, coordinate, random):
-    list_folder = [f for f in os.listdir(data_path) if not f.endswith('.zip')]
+    """Display preview of ECG area cropping on sample images.
+
+    Shows original image with red bounding box and cropped result side-by-side
+    for one image from each class folder.
+
+    Args:
+        data_path (str): Path to raw data directory containing class folders.
+        coordinate (dict): Dictionary with 'left', 'top', 'right', 'bottom' pixel coordinates.
+        random (bool): If True, select random image; otherwise use first image.
+    """
+    list_folder = _list_class_folders(data_path, exclude_text_mask=False)
     all_images_data = []
     
     for folder in list_folder:
@@ -59,10 +139,20 @@ def preview_cropped_ecg_area(data_path, coordinate, random):
     plt.show()
 
 def crop_ecg_area(folder_source, folder_target, coordinate):
+    """Crop ECG area from all images in all class folders.
+
+    Extracts the ECG signal area (defined by coordinates) from each image
+    and saves cropped versions to folder_target/crop_ecg_area/.
+
+    Args:
+        folder_source (str): Source directory with raw ECG images in class subfolders.
+        folder_target (str): Target base directory where cropped images will be saved.
+        coordinate (dict): Dictionary with 'left', 'top', 'right', 'bottom' pixel coordinates.
+    """
     folder_target = f'{folder_target}/crop_ecg_area'
     os.makedirs(folder_target, exist_ok=True)
 
-    list_folder = [f for f in os.listdir(folder_source) if not f.endswith('.zip')]
+    list_folder = _list_class_folders(folder_source, exclude_text_mask=False)
     left, top, right, bottom = map(int, coordinate.values())
 
     for folder in list_folder:
@@ -77,12 +167,23 @@ def crop_ecg_area(folder_source, folder_target, coordinate):
             img_crop.save(os.path.join(folder_target, folder, img_name))
 
 def clean_ecg_signal(img_path):
+    """Extract clean ECG signal from image using adaptive threshold and morphology.
+
+    Reads grayscale ECG image, applies Gaussian blur, adaptive threshold to isolate
+    dark ECG lines, morphological closing to connect broken lines, and connected
+    components filtering to remove noise. Returns black ECG signal on white background.
+
+    Args:
+        img_path (str): Path to the ECG image file.
+
+    Returns:
+        np.ndarray: Cleaned ECG signal (grayscale, black signal on white background).
+    """
     img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
 
-    # 1. Blur ringan agar noise berkurang
     blur = cv2.GaussianBlur(img, (3, 3), 0)
 
-    # 2. Ambil objek gelap (garis ECG) dengan adaptive threshold
+    # Adaptive threshold inverted (BINARY_INV) to extract dark ECG lines
     binary = cv2.adaptiveThreshold(
         blur,
         255,
@@ -92,11 +193,11 @@ def clean_ecg_signal(img_path):
         10     # constant C
     )
 
-    # 3. Sambungkan garis yang tipis / sedikit putus
+    # Morphological closing to connect thin or broken ECG lines
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
     binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=1)
 
-    # 4. Hapus titik-titik kecil dengan connected components
+    # Connected components: label each connected region
     num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
 
     clean = np.zeros_like(binary)
@@ -104,20 +205,29 @@ def clean_ecg_signal(img_path):
     min_area = 100
     min_width = 60
 
+    # Keep only components that are large enough or wide enough (filters out noise)
     for i in range(1, num_labels):
         x, y, w, h, area = stats[i]
 
-        # simpan komponen yang cukup besar / memanjang
         if area >= min_area or w >= min_width:
             clean[labels == i] = 255
 
-    # 5. Ubah jadi garis hitam di background putih
+    # Convert to black signal on white background
     result = np.ones_like(clean) * 255
     result[clean == 255] = 0
     return result
 
 def preview_extract_ecg_signal(data_path, random):
-    list_folder = [f for f in os.listdir(data_path) if not f.endswith('.zip')]
+    """Display preview of ECG signal extraction on sample images.
+
+    Shows original cropped ECG image and cleaned signal result side-by-side
+    for one image from each class folder.
+
+    Args:
+        data_path (str): Path to cropped ECG data directory containing class folders.
+        random (bool): If True, select random image; otherwise use first image.
+    """
+    list_folder = _list_class_folders(data_path, exclude_text_mask=False)
     all_images_data = []
     
     for folder in list_folder:
@@ -163,10 +273,19 @@ def preview_extract_ecg_signal(data_path, random):
     plt.show()
 
 def extract_ecg_signal(folder_source, folder_target):
+    """Extract clean ECG signals from all cropped images in all class folders.
+
+    Applies clean_ecg_signal() to each image and saves cleaned versions to
+    folder_target/extracted_ecg_signal/.
+
+    Args:
+        folder_source (str): Source directory with cropped ECG images in class subfolders.
+        folder_target (str): Target base directory where cleaned signals will be saved.
+    """
     folder_target = f'{folder_target}/extracted_ecg_signal'
     os.makedirs(folder_target, exist_ok=True)
 
-    list_folder = [f for f in os.listdir(folder_source) if not f.endswith('.zip')]
+    list_folder = _list_class_folders(folder_source, exclude_text_mask=False)
     
     for folder in list_folder:
         folder_path = os.path.join(folder_source, folder)
@@ -179,6 +298,15 @@ def extract_ecg_signal(folder_source, folder_target):
             cv2.imwrite(os.path.join(folder_target, folder, img_name), img_clean)
 
 def create_text_mask(data_path, folder_target):
+    """Create a text mask template from a Normal ECG image.
+
+    Cleans an ECG image and inverts it to create a mask of text regions.
+    This mask is used later to remove text from other ECG images.
+
+    Args:
+        data_path (str): Path to cropped ECG data containing ECG_Normal folder.
+        folder_target (str): Target directory where text_mask will be saved.
+    """
     img_path = os.path.join(data_path, "ECG_Normal", os.listdir(os.path.join(data_path, "ECG_Normal"))[0])
     result = clean_ecg_signal(img_path)
     result_invert = cv2.bitwise_not(result)
@@ -201,23 +329,31 @@ def create_text_mask(data_path, folder_target):
     plt.show()
 
 def preview_delete_text(data_path, text_mask_path, random):
-    # 1. Load Mask Utama (Grayscale)
+    """Display preview of text removal on sample ECG images.
+
+    Shows extracted ECG signal and cleaned result (with text removed) side-by-side
+    for one image from each class folder.
+
+    Args:
+        data_path (str): Path to extracted ECG signals directory containing class folders.
+        text_mask_path (str): Path to the text mask image file.
+        random (bool): If True, select random image; otherwise use first image.
+    """
     text_mask_raw = cv2.imread(text_mask_path, cv2.IMREAD_GRAYSCALE)
     if text_mask_raw is None:
         print(f"Error: Mask tidak ditemukan di {text_mask_path}")
         return
 
-    # 2. List Folder (kecuali .zip dan folder mask itu sendiri)
-    list_folder = [f for f in os.listdir(data_path) if not f.endswith('.zip') and os.path.isdir(os.path.join(data_path, f))]
-    list_folder = [f for f in list_folder if f != 'text_mask']
-    
+    list_folder = _list_class_folders(data_path, exclude_text_mask=True)
+
     all_images_data = []
     for folder in list_folder:
         folder_path = os.path.join(data_path, folder)
         images = [i for i in os.listdir(folder_path) if i.lower().endswith(('.png', '.jpg', '.jpeg'))]
-        
-        if not images: continue
-        
+
+        if not images:
+            continue
+
         img_name = np.random.choice(images) if random else images[0]
         all_images_data.append({
             "path": os.path.join(folder_path, img_name),
@@ -226,57 +362,27 @@ def preview_delete_text(data_path, text_mask_path, random):
         })
 
     total_rows = len(all_images_data)
-    if total_rows == 0: return
+    if total_rows == 0:
+        return
 
     fig, axes = plt.subplots(total_rows, 2, figsize=(16, 6 * total_rows), dpi=100)
-    if total_rows == 1: axes = np.expand_dims(axes, axis=0)
+    if total_rows == 1:
+        axes = np.expand_dims(axes, axis=0)
 
     for idx, data in enumerate(all_images_data):
-        # --- PROSES EKSTRAKSI SINYAL (Sesuai Logika Anda yang Berhasil) ---
+        result_no_text = _clean_and_remove_text(data["path"], text_mask_raw, scale=2)
+        if result_no_text is None:
+            continue
+
+        # Read original for comparison
         img = cv2.imread(data["path"], cv2.IMREAD_GRAYSCALE)
-        if img is None: continue
-        
-        scale = 2
-        img_res = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
-        
-        # Adaptive Threshold untuk ambil garis ECG (hitam)
-        blur = cv2.GaussianBlur(img_res, (3, 3), 0)
-        binary = cv2.adaptiveThreshold(blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-                                       cv2.THRESH_BINARY_INV, 31, 8)
-        
-        # Pembersihan komponen kecil (Noise Removal)
-        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
-        clean = np.zeros_like(binary)
-        min_area = 100 * (scale ** 2)
-        min_width = 60 * scale
+        result = np.ones_like(img) * 255
+        result[img == 0] = 0  # Approximate original signal for display
 
-        for i in range(1, num_labels):
-            x, y, w, h, area = stats[i]
-            if area >= min_area or w >= min_width:
-                clean[labels == i] = 255
-
-        # Ubah ke Sinyal Hitam di Background Putih
-        result = np.ones_like(clean) * 255
-        result[clean == 255] = 0
-
-        # --- PROSES PENGHAPUSAN TEKS BERDASARKAN MASK ---
-        # Resize mask ke ukuran gambar hasil resize (HD)
-        mask_res = cv2.resize(text_mask_raw, (result.shape[1], result.shape[0]), interpolation=cv2.INTER_NEAREST)
-        _, mask_bin = cv2.threshold(mask_res, 127, 255, cv2.THRESH_BINARY)
-        
-        # Perlebar mask teks sedikit agar bersih
-        kernel_text = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-        mask_wide = cv2.dilate(mask_bin, kernel_text, iterations=2)
-
-        # LOGIKA KRUSIAL: Ubah area mask menjadi PUTIH (Background)
-        result_no_text = result.copy()
-        result_no_text[mask_wide == 255] = 255 
-
-        # --- VISUALISASI ---
         axes[idx, 0].imshow(result, cmap="gray")
         axes[idx, 0].set_title(f"Original Signal: {data['folder']}")
         axes[idx, 0].axis("off")
-        
+
         axes[idx, 1].imshow(result_no_text, cmap="gray")
         axes[idx, 1].set_title("Text Removed")
         axes[idx, 1].axis("off")
@@ -285,6 +391,16 @@ def preview_delete_text(data_path, text_mask_path, random):
     plt.show()
 
 def delete_text_from_ecg(data_path, folder_target, text_mask_path):
+    """Remove text from all ECG images in all class folders.
+
+    Applies text removal using the provided mask to each image and saves
+    cleaned versions to folder_target, preserving class folder structure.
+
+    Args:
+        data_path (str): Source directory with extracted ECG signals in class subfolders.
+        folder_target (str): Target directory where cleaned images will be saved.
+        text_mask_path (str): Path to the text mask image file.
+    """
     text_mask_raw = cv2.imread(text_mask_path, cv2.IMREAD_GRAYSCALE)
     if text_mask_raw is None:
         print(f"Error: Mask tidak ditemukan di {text_mask_path}")
@@ -292,9 +408,8 @@ def delete_text_from_ecg(data_path, folder_target, text_mask_path):
 
     os.makedirs(folder_target, exist_ok=True)
 
-    list_folder = [f for f in os.listdir(data_path) if not f.endswith('.zip') and os.path.isdir(os.path.join(data_path, f))]
-    list_folder = [f for f in list_folder if f != 'text_mask']
-    
+    list_folder = _list_class_folders(data_path, exclude_text_mask=True)
+
     for folder in list_folder:
         folder_path = os.path.join(data_path, folder)
         images = [i for i in os.listdir(folder_path) if i.lower().endswith(('.png', '.jpg', '.jpeg'))]
@@ -302,48 +417,28 @@ def delete_text_from_ecg(data_path, folder_target, text_mask_path):
 
         for img_name in tqdm.tqdm(images, desc=f"Removing Text {folder}"):
             img_path = os.path.join(folder_path, img_name)
-            img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
-            if img is None: continue
-            
-            scale = 2
-            img_res = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
-            
-            blur = cv2.GaussianBlur(img_res, (3, 3), 0)
-            binary = cv2.adaptiveThreshold(blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-                                           cv2.THRESH_BINARY_INV, 31, 8)
-            
-            num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
-            clean = np.zeros_like(binary)
-            min_area = 100 * (scale ** 2)
-            min_width = 60 * scale
+            result_no_text = _clean_and_remove_text(img_path, text_mask_raw, scale=2)
 
-            for i in range(1, num_labels):
-                x, y, w, h, area = stats[i]
-                if area >= min_area or w >= min_width:
-                    clean[labels == i] = 255
-
-            result = np.ones_like(clean) * 255
-            result[clean == 255] = 0
-
-            mask_res = cv2.resize(text_mask_raw, (result.shape[1], result.shape[0]), interpolation=cv2.INTER_NEAREST)
-            _, mask_bin = cv2.threshold(mask_res, 127, 255, cv2.THRESH_BINARY)
-            
-            kernel_text = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-            mask_wide = cv2.dilate(mask_bin, kernel_text, iterations=2)
-
-            result_no_text = result.copy()
-            result_no_text[mask_wide == 255] = 255
+            if result_no_text is None:
+                continue
 
             output_path = os.path.join(folder_target, folder, img_name)
             cv2.imwrite(output_path, result_no_text)
     
 def preview_cropped_short_and_long_leads(data_path, random, coordinate_short, coordinate_long):
-    """Preview how images will be cropped into short and long lead areas."""
-    list_folder = [
-        f for f in os.listdir(data_path)
-        if not f.endswith('.zip') and os.path.isdir(os.path.join(data_path, f))
-    ]
-    list_folder = [f for f in list_folder if f != 'text_mask']
+    """Display preview of short and long lead cropping on sample images.
+
+    Shows original image with short (red, 3x4) and long (cyan) lead rectangles,
+    plus the cropped short leads grid and long lead separately for one image
+    from each class folder.
+
+    Args:
+        data_path (str): Path to cleaned ECG signals directory containing class folders.
+        random (bool): If True, select random image; otherwise use first image.
+        coordinate_short (dict): Dictionary with x1, y1, x2, y2 for short leads area.
+        coordinate_long (dict): Dictionary with x1, y1, x2, y2 for long lead area.
+    """
+    list_folder = _list_class_folders(data_path, exclude_text_mask=True)
 
     if not list_folder:
         print("No folders found")
@@ -454,70 +549,69 @@ def preview_cropped_short_and_long_leads(data_path, random, coordinate_short, co
     plt.show()
 
 def crop_short_and_long_leads(folder_source, folder_target, coordinate_short, coordinate_long, lead_mapping):
-    """
-    Crops ECG images into 12 short leads and 1 long lead, saved into sample-specific folders.
-    
+    """Crop ECG images into 12 short leads and 1 long lead per sample.
+
+    Extracts short leads (12 leads in 3x4 grid) and long lead (1 lead) from each ECG image,
+    creating per-sample folders to organize individual leads for downstream analysis.
+
     Output structure:
-    folder_target/
-    └── [class_folder]/
-        └── [sample_name]/           <-- Folder per gambar asli
-            ├── 01_lead_I.png
-            ├── 02_lead_II.png
-            ├── ...
-            └── 13_long_lead.png
+        folder_target/
+        └── [class_folder]/
+            └── [sample_name]/
+                ├── 01_lead_I.png
+                ├── 02_lead_II.png
+                ├── ...
+                └── 13_long_lead.png
+
+    Args:
+        folder_source (str): Source directory with cleaned ECG images in class subfolders.
+        folder_target (str): Target base directory where per-sample lead folders will be created.
+        coordinate_short (dict): Dictionary with x1, y1, x2, y2 for short leads area (3x4 grid).
+        coordinate_long (dict): Dictionary with x1, y1, x2, y2 for long lead area.
+        lead_mapping (dict): Dictionary mapping lead indices (1-12) to lead names.
     """
-    
-    # Ambil daftar folder kelas (ECG_Abnormal, dll)
-    list_folder = [f for f in os.listdir(folder_source) 
-                  if not f.endswith('.zip') and os.path.isdir(os.path.join(folder_source, f))]
-    list_folder = [f for f in list_folder if f != 'text_mask']
-    
+    list_folder = _list_class_folders(folder_source, exclude_text_mask=True)
+
     for class_folder in list_folder:
         class_source_path = os.path.join(folder_source, class_folder)
         images = [i for i in os.listdir(class_source_path) if i.lower().endswith(('.png', '.jpg', '.jpeg'))]
-        
+
         for img_name in tqdm.tqdm(images, desc=f"Processing {class_folder}"):
             img_path = os.path.join(class_source_path, img_name)
             img = Image.open(img_path)
-            
-            # 1. Buat folder khusus untuk sampel ini (Sample ID-Based)
-            # Contoh: folder_target/ECG_Abnormal/HB(1)/
+
             sample_name = os.path.splitext(img_name)[0]
             sample_dir = os.path.join(folder_target, class_folder, sample_name)
             os.makedirs(sample_dir, exist_ok=True)
 
-            # --- PROSES SHORT LEADS (12 leads) ---
-            # Ambil koordinat area 3x4
             s_left, s_top, s_right, s_bottom = map(int, coordinate_short.values())
-            
+
             short_w = s_right - s_left
             short_h = s_bottom - s_top
             cell_w = short_w / 4
             cell_h = short_h / 3
-            
+
+            # Extract 12 short leads from 3x4 grid
             for lead_idx, lead_name in lead_mapping.items():
-                # Tentukan posisi sel dalam grid 3x4
-                # lead_idx 1-4 (baris 0), 5-8 (baris 1), 9-12 (baris 2)
+                # Map lead index (1-12) to grid position: row = index // 4, col = index % 4
+                # Indices 1-4 in row 0, 5-8 in row 1, 9-12 in row 2
                 row = (lead_idx - 1) // 4
                 col = (lead_idx - 1) % 4
-                
-                # Koordinat relatif terhadap gambar asli
+
                 left = s_left + (col * cell_w)
                 top = s_top + (row * cell_h)
                 right = left + cell_w
                 bottom = top + cell_h
-                
+
                 img_lead = img.crop((int(left), int(top), int(right), int(bottom)))
-                
-                # Simpan dengan nomor urut agar mudah di-sort saat loading (01, 02, ... 12)
+
                 lead_filename = f"{lead_idx:02d}_lead_{lead_name}.png"
                 img_lead.save(os.path.join(sample_dir, lead_filename))
 
-            # --- PROSES LONG LEAD (1 lead) ---
+            # Extract 1 long lead
             l_left, l_top, l_right, l_bottom = map(int, coordinate_long.values())
-            
+
             img_long = img.crop((l_left, l_top, l_right, l_bottom))
-            
-            # Simpan sebagai urutan ke-13
+
             long_filename = "13_long_lead.png"
             img_long.save(os.path.join(sample_dir, long_filename))
