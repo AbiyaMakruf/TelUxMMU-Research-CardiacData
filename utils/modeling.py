@@ -842,31 +842,25 @@ def evaluate_and_log(model, test_loader, device, class_names: list,
     print(f"ROC-AUC  : {roc_auc:.4f}")
     print(classification_report(labels, preds, target_names=class_names, zero_division=0))
 
-    # Log test metrics to MLflow if run_name is provided
-    if run_name is not None:
-        # Reopen parent training run so this eval run is a true nested child
-        parent_ctx = (mlflow.start_run(run_id=parent_run_id)
-                      if parent_run_id is not None
-                      else contextlib.nullcontext())
+    # Log test metrics directly into the parent training run (no separate child run)
+    if parent_run_id is not None:
+        with mlflow.start_run(run_id=parent_run_id):
+            mlflow.log_metrics({
+                "test_accuracy": acc,
+                "test_f1_macro": f1,
+                "test_roc_auc":  roc_auc,
+            })
 
-        with parent_ctx:
-            with mlflow.start_run(run_name=run_name, nested=True):
-                mlflow.log_metrics({
-                    "test_accuracy": acc,
-                    "test_f1_macro": f1,
-                    "test_roc_auc":  roc_auc,
-                })
+            tmp_cm_path = os.path.join(tempfile.gettempdir(), f"cm_test_{scheme}_{task}.png")
+            _plot_and_save_confusion_matrix(labels, preds, class_names, tmp_cm_path)
+            mlflow.log_artifact(tmp_cm_path, artifact_path="plots")
 
-                tmp_cm_path = os.path.join(tempfile.gettempdir(), f"cm_test_{run_name}.png")
-                _plot_and_save_confusion_matrix(labels, preds, class_names, tmp_cm_path)
-                mlflow.log_artifact(tmp_cm_path, artifact_path="plots")
-
-                if output_dir:
-                    os.makedirs(output_dir, exist_ok=True)
-                    local_cm_path = os.path.join(output_dir, "confusion_matrix_test.png")
-                    shutil.copy2(tmp_cm_path, local_cm_path)
-                    os.remove(tmp_cm_path)
-                    print(f"Test confusion matrix saved to: {local_cm_path}")
+            if output_dir:
+                os.makedirs(output_dir, exist_ok=True)
+                local_cm_path = os.path.join(output_dir, "confusion_matrix_test.png")
+                shutil.copy2(tmp_cm_path, local_cm_path)
+                os.remove(tmp_cm_path)
+                print(f"Test confusion matrix saved to: {local_cm_path}")
 
     return {"accuracy": acc, "f1": f1, "roc_auc": roc_auc, "preds": preds, "labels": labels}
 
