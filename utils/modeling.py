@@ -23,6 +23,10 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms, models
+from torchvision.models import (
+    MobileNet_V2_Weights,
+    EfficientNet_V2_S_Weights,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -352,116 +356,172 @@ def build_dataloaders(dataset, seed: int = 42, batch_size: int = 16,
 # ---------------------------------------------------------------------------
 
 def build_model(num_classes: int, in_channels: int = 3, pretrained: bool = True,
-                freeze_layers: bool = True):
-    """Build a ResNet-18 classification model adapted for ECG input (Schemes 1 & 2).
+                freeze_layers: bool = True, backbone: str = "resnet18"):
+    """Build a classification model adapted for ECG input (Schemes 1 & 2).
 
-    Uses a pretrained ResNet-18 backbone. The first convolution layer is
-    replaced when in_channels != 3 (e.g. multi-lead stacked input).
+    Supports ResNet-18, MobileNetV2, and EfficientNetV2-S backbones.
+    The first convolution layer is replaced when in_channels != 3 (e.g. multi-lead stacked input).
     The final FC layer is replaced to output num_classes logits.
-    Optionally freezes layer1 and layer2 to reduce overfitting on small datasets.
+    Optionally freezes early layers to reduce overfitting on small datasets.
 
     Args:
         num_classes (int): Number of output classes (2 or 4).
         in_channels (int): Number of input channels. 3 for Scheme 1,
             39 for Scheme 2 (13 leads x 3 channels). Defaults to 3.
         pretrained (bool): Use ImageNet pretrained weights. Defaults to True.
-        freeze_layers (bool): If True, freeze layer1 and layer2 (first half of
-            backbone) to reduce overfitting. Only meaningful when pretrained=True.
-            Defaults to True.
+        freeze_layers (bool): If True, freeze early layers. Defaults to True.
+        backbone (str): Backbone model: "resnet18", "mobilenet_v2", "efficientnet_v2_s".
+            Defaults to "resnet18".
 
     Returns:
-        torch.nn.Module: Modified ResNet-18 model.
+        torch.nn.Module: Modified model.
     """
-    weights = models.ResNet18_Weights.IMAGENET1K_V1 if pretrained else None
-    model = models.resnet18(weights=weights)
+    if backbone == "resnet18":
+        weights = models.ResNet18_Weights.IMAGENET1K_V1 if pretrained else None
+        model = models.resnet18(weights=weights)
+        if in_channels != 3:
+            model.conv1 = nn.Conv2d(in_channels, 64, 7, stride=2, padding=3, bias=False)
+        model.fc = nn.Linear(model.fc.in_features, num_classes)
+        if freeze_layers:
+            for param in model.layer1.parameters():
+                param.requires_grad = False
+            for param in model.layer2.parameters():
+                param.requires_grad = False
 
-    if in_channels != 3:
-        # Replace first conv to accept stacked multi-lead channels
-        model.conv1 = nn.Conv2d(
-            in_channels, 64, kernel_size=7, stride=2, padding=3, bias=False
-        )
+    elif backbone == "mobilenet_v2":
+        weights = MobileNet_V2_Weights.IMAGENET1K_V1 if pretrained else None
+        model = models.mobilenet_v2(weights=weights)
+        if in_channels != 3:
+            model.features[0][0] = nn.Conv2d(in_channels, 32, 3, stride=2, padding=1, bias=False)
+        model.classifier[1] = nn.Linear(1280, num_classes)
+        if freeze_layers:
+            for param in model.features[0].parameters():
+                param.requires_grad = False
+            for param in model.features[1].parameters():
+                param.requires_grad = False
 
-    model.fc = nn.Linear(model.fc.in_features, num_classes)
+    elif backbone == "efficientnet_v2_s":
+        weights = EfficientNet_V2_S_Weights.IMAGENET1K_V1 if pretrained else None
+        model = models.efficientnet_v2_s(weights=weights)
+        if in_channels != 3:
+            model.features[0][0] = nn.Conv2d(in_channels, 24, 3, stride=2, padding=1, bias=False)
+        model.classifier[1] = nn.Linear(1280, num_classes)
+        if freeze_layers:
+            for param in model.features[0].parameters():
+                param.requires_grad = False
+            for param in model.features[1].parameters():
+                param.requires_grad = False
 
-    if freeze_layers:
-        for param in model.layer1.parameters():
-            param.requires_grad = False
-        for param in model.layer2.parameters():
-            param.requires_grad = False
+    else:
+        raise ValueError(f"Unsupported backbone: {backbone}")
 
     return model
 
 
-class _BranchResNet18(nn.Module):
-    """Single ResNet-18 feature extractor branch without FC head.
+class _BranchBackbone(nn.Module):
+    """Feature extractor branch with configurable backbone (ResNet-18, MobileNetV2, EfficientNetV2-S).
 
-    Used internally by MultiBranchResNet18 for Scheme 3.
-    Outputs a 512-dimensional feature vector per sample.
+    Used internally by MultiBranchModel for Scheme 3. Exposes self.feature_dim
+    to indicate output feature size for dynamic classifier sizing.
 
     Args:
-        in_channels (int): Number of input channels for conv1.
+        in_channels (int): Number of input channels.
         pretrained (bool): Load ImageNet weights. Defaults to True.
-        freeze_layers (bool): Freeze layer1 and layer2. Defaults to True.
+        freeze_layers (bool): Freeze early layers. Defaults to True.
+        backbone (str): Backbone architecture: "resnet18", "mobilenet_v2", "efficientnet_v2_s".
+            Defaults to "resnet18".
     """
+
+    def __init__(self, in_channels: int, pretrained: bool = True,
+                 freeze_layers: bool = True, backbone: str = "resnet18"):
+        super().__init__()
+        self.backbone_name = backbone
+
+        if backbone == "resnet18":
+            weights = models.ResNet18_Weights.IMAGENET1K_V1 if pretrained else None
+            model = models.resnet18(weights=weights)
+            if in_channels != 3:
+                model.conv1 = nn.Conv2d(in_channels, 64, 7, stride=2, padding=3, bias=False)
+            if freeze_layers:
+                for param in model.layer1.parameters():
+                    param.requires_grad = False
+                for param in model.layer2.parameters():
+                    param.requires_grad = False
+            self.features = nn.Sequential(
+                model.conv1, model.bn1, model.relu, model.maxpool,
+                model.layer1, model.layer2, model.layer3, model.layer4, model.avgpool
+            )
+            self.feature_dim = 512
+
+        elif backbone == "mobilenet_v2":
+            weights = MobileNet_V2_Weights.IMAGENET1K_V1 if pretrained else None
+            model = models.mobilenet_v2(weights=weights)
+            if in_channels != 3:
+                model.features[0][0] = nn.Conv2d(in_channels, 32, 3, stride=2, padding=1, bias=False)
+            if freeze_layers:
+                for param in model.features[0].parameters():
+                    param.requires_grad = False
+                for param in model.features[1].parameters():
+                    param.requires_grad = False
+            self.features = nn.Sequential(model.features, nn.AdaptiveAvgPool2d(1))
+            self.feature_dim = 1280
+
+        elif backbone == "efficientnet_v2_s":
+            weights = EfficientNet_V2_S_Weights.IMAGENET1K_V1 if pretrained else None
+            model = models.efficientnet_v2_s(weights=weights)
+            if in_channels != 3:
+                model.features[0][0] = nn.Conv2d(in_channels, 24, 3, stride=2, padding=1, bias=False)
+            if freeze_layers:
+                for param in model.features[0].parameters():
+                    param.requires_grad = False
+                for param in model.features[1].parameters():
+                    param.requires_grad = False
+            self.features = nn.Sequential(model.features, nn.AdaptiveAvgPool2d(1))
+            self.feature_dim = 1280
+
+        else:
+            raise ValueError(f"Unsupported backbone: {backbone}")
+
+    def forward(self, x):
+        return torch.flatten(self.features(x), 1)
+
+
+class _BranchResNet18(nn.Module):
+    """Backward-compatibility alias for _BranchBackbone with ResNet-18."""
 
     def __init__(self, in_channels: int, pretrained: bool = True,
                  freeze_layers: bool = True):
         super().__init__()
-        weights = models.ResNet18_Weights.IMAGENET1K_V1 if pretrained else None
-        backbone = models.resnet18(weights=weights)
-
-        if in_channels != 3:
-            backbone.conv1 = nn.Conv2d(
-                in_channels, 64, kernel_size=7, stride=2, padding=3, bias=False
-            )
-
-        if freeze_layers:
-            for param in backbone.layer1.parameters():
-                param.requires_grad = False
-            for param in backbone.layer2.parameters():
-                param.requires_grad = False
-
-        self.features = nn.Sequential(
-            backbone.conv1,
-            backbone.bn1,
-            backbone.relu,
-            backbone.maxpool,
-            backbone.layer1,
-            backbone.layer2,
-            backbone.layer3,
-            backbone.layer4,
-            backbone.avgpool,
-        )
+        self._branch = _BranchBackbone(in_channels, pretrained, freeze_layers, backbone="resnet18")
+        self.features = self._branch.features
+        self.feature_dim = self._branch.feature_dim
 
     def forward(self, x):
-        return torch.flatten(self.features(x), 1)  # (B, 512)
+        return self._branch(x)
 
 
-class MultiBranchResNet18(nn.Module):
-    """Three-branch ResNet-18 for anatomically grouped ECG leads (Scheme 3).
+class MultiBranchModel(nn.Module):
+    """Multi-branch model for anatomically grouped ECG leads (Scheme 3).
 
-    Branch layout:
-      - branch_limb       : 18-channel input (6 limb leads x 3 ch)
-      - branch_precordial : 18-channel input (6 precordial leads x 3 ch)
-      - branch_long       :  3-channel input (1 long lead x 3 ch, fully pretrained)
-
-    All three 512-dim outputs are concatenated → Linear(1536, num_classes).
-    This contrasts with Scheme 2 which stacks all leads into one 39-channel
-    tensor fed to a single ResNet-18.
+    Three separate branches process limb leads (18ch), precordial leads (18ch),
+    and long lead (3ch) independently. Feature vectors are concatenated and
+    classified. Supports ResNet-18, MobileNetV2, and EfficientNetV2-S backbones.
 
     Args:
         num_classes (int): Number of output classes.
-        pretrained (bool): Use ImageNet weights for each branch. Defaults to True.
-        freeze_layers (bool): Freeze layer1/layer2 of each branch. Defaults to True.
+        pretrained (bool): Use ImageNet weights. Defaults to True.
+        freeze_layers (bool): Freeze early layers. Defaults to True.
+        backbone (str): Backbone architecture. Defaults to "resnet18".
     """
 
     def __init__(self, num_classes: int, pretrained: bool = True,
-                 freeze_layers: bool = True):
+                 freeze_layers: bool = True, backbone: str = "resnet18"):
         super().__init__()
-        self.branch_limb       = _BranchResNet18(18, pretrained, freeze_layers)
-        self.branch_precordial = _BranchResNet18(18, pretrained, freeze_layers)
-        self.branch_long       = _BranchResNet18(3,  pretrained, freeze_layers)
-        self.classifier = nn.Linear(512 * 3, num_classes)
+        self.branch_limb       = _BranchBackbone(18, pretrained, freeze_layers, backbone)
+        self.branch_precordial = _BranchBackbone(18, pretrained, freeze_layers, backbone)
+        self.branch_long       = _BranchBackbone(3,  pretrained, freeze_layers, backbone)
+        feature_dim = self.branch_limb.feature_dim
+        self.classifier = nn.Linear(feature_dim * 3, num_classes)
 
     def forward(self, inputs):
         t_limb, t_precordial, t_long = inputs
@@ -469,28 +529,36 @@ class MultiBranchResNet18(nn.Module):
             self.branch_limb(t_limb),
             self.branch_precordial(t_precordial),
             self.branch_long(t_long),
-        ], dim=1)  # (B, 1536)
+        ], dim=1)
         return self.classifier(feat)
 
 
-def build_model_multibranch(num_classes: int, pretrained: bool = True,
-                             freeze_layers: bool = True):
-    """Construct a MultiBranchResNet18 model for Scheme 3.
+class MultiBranchResNet18(MultiBranchModel):
+    """Backward-compatibility alias for MultiBranchModel with ResNet-18 backbone."""
 
-    Three separate ResNet-18 branches process limb leads (18ch), precordial
-    leads (18ch), and long lead (3ch) independently. Their 512-dim feature
-    vectors are concatenated and classified together. Compare with Scheme 2's
-    single ResNet-18 that receives all 39 channels stacked.
+    def __init__(self, num_classes: int, pretrained: bool = True,
+                 freeze_layers: bool = True):
+        super().__init__(num_classes, pretrained, freeze_layers, backbone="resnet18")
+
+
+def build_model_multibranch(num_classes: int, pretrained: bool = True,
+                             freeze_layers: bool = True, backbone: str = "resnet18"):
+    """Construct a MultiBranchModel for Scheme 3.
+
+    Three separate branches process limb leads (18ch), precordial leads (18ch),
+    and long lead (3ch) independently. Feature vectors are concatenated and
+    classified. Supports ResNet-18, MobileNetV2, and EfficientNetV2-S backbones.
 
     Args:
         num_classes (int): Number of output classes (2 or 4).
         pretrained (bool): Use ImageNet pretrained weights. Defaults to True.
-        freeze_layers (bool): Freeze layer1 and layer2 of each branch. Defaults to True.
+        freeze_layers (bool): Freeze early layers. Defaults to True.
+        backbone (str): Backbone architecture. Defaults to "resnet18".
 
     Returns:
-        MultiBranchResNet18: Multi-branch model instance.
+        MultiBranchModel: Multi-branch model instance.
     """
-    return MultiBranchResNet18(num_classes, pretrained, freeze_layers)
+    return MultiBranchModel(num_classes, pretrained, freeze_layers, backbone)
 
 
 # ---------------------------------------------------------------------------
