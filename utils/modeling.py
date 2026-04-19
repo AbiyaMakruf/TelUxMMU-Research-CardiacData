@@ -473,8 +473,10 @@ def train_model(model, train_loader, val_loader, num_epochs: int,
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 
     history = {"train_loss": [], "train_acc": [], "val_loss": [], "val_acc": []}
-    best_val_acc = 0.0
+    best_val_acc = -float('inf')
     best_model_state = None
+    best_val_preds = []
+    best_val_labels = []
 
     # Get GPU info
     if torch.cuda.is_available():
@@ -534,7 +536,8 @@ def train_model(model, train_loader, val_loader, num_epochs: int,
                 best_val_labels = val_labels
 
         # Restore best model
-        model.load_state_dict(best_model_state)
+        if best_model_state is not None:
+            model.load_state_dict(best_model_state)
         mlflow.pytorch.log_model(model, artifact_path="model")
         mlflow.log_metric("best_val_acc", best_val_acc)
 
