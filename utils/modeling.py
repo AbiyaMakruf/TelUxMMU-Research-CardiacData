@@ -1,4 +1,7 @@
 import os
+import time
+import tempfile
+from datetime import datetime
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -439,12 +442,14 @@ def evaluate(model, loader, criterion, device):
 
 def train_model(model, train_loader, val_loader, num_epochs: int,
                 learning_rate: float, device, run_name: str,
-                scheme: str, task: str):
-    """Train a model with MLflow logging and return training history.
+                scheme: str, task: str, model_name: str = "ResNet-18",
+                class_names: list = None):
+    """Train a model with comprehensive MLflow logging and artifact saving.
 
-    Logs hyperparameters, per-epoch metrics, and final model artifact to
-    the active MLflow run. Uses CrossEntropyLoss and Adam optimizer.
-    Saves the best model checkpoint based on validation accuracy.
+    Logs hyperparameters (including model name, GPU info, date/time, training time),
+    per-epoch metrics, training/validation plots, confusion matrix, and final model.
+    Uses CrossEntropyLoss and Adam optimizer. Saves the best model checkpoint
+    based on validation accuracy.
 
     Args:
         model (nn.Module): Model to train.
@@ -456,6 +461,8 @@ def train_model(model, train_loader, val_loader, num_epochs: int,
         run_name (str): MLflow run name for this experiment.
         scheme (str): Scheme identifier ('scheme1', 'scheme2', 'scheme3').
         task (str): Task identifier ('2class' or '4class').
+        model_name (str): Human-readable model name. Defaults to "ResNet-18".
+        class_names (list): Class names for confusion matrix. Defaults to None.
 
     Returns:
         tuple[nn.Module, dict]: (best_model, history) where history contains
@@ -468,6 +475,19 @@ def train_model(model, train_loader, val_loader, num_epochs: int,
     best_val_acc = 0.0
     best_model_state = None
 
+    # Get GPU info
+    if torch.cuda.is_available():
+        gpu_name = torch.cuda.get_device_name(0)
+    else:
+        gpu_name = "CPU"
+
+    # Get date and time in format DD:MM-HH:MM
+    now = datetime.now()
+    date_time = f"{now.day:02d}:{now.month:02d}-{now.hour:02d}:{now.minute:02d}"
+
+    # Record start time for training duration
+    start_time = time.time()
+
     with mlflow.start_run(run_name=run_name):
         mlflow.log_params({
             "scheme": scheme,
@@ -475,11 +495,14 @@ def train_model(model, train_loader, val_loader, num_epochs: int,
             "num_epochs": num_epochs,
             "learning_rate": learning_rate,
             "batch_size": train_loader.batch_size,
+            "model_name": model_name,
+            "gpu_name": gpu_name,
+            "date_time": date_time,
         })
 
         for epoch in range(num_epochs):
             train_loss, train_acc = train_one_epoch(model, train_loader, optimizer, criterion, device)
-            val_loss, val_acc, _, _ = evaluate(model, val_loader, criterion, device)
+            val_loss, val_acc, val_preds, val_labels = evaluate(model, val_loader, criterion, device)
 
             history["train_loss"].append(train_loss)
             history["train_acc"].append(train_acc)
@@ -501,21 +524,110 @@ def train_model(model, train_loader, val_loader, num_epochs: int,
             if val_acc > best_val_acc:
                 best_val_acc = val_acc
                 best_model_state = {k: v.clone() for k, v in model.state_dict().items()}
+                # Store val preds/labels for best model's confusion matrix
+                best_val_preds = val_preds
+                best_val_labels = val_labels
 
-        # Restore and log best model
+        # Restore best model
         model.load_state_dict(best_model_state)
         mlflow.pytorch.log_model(model, artifact_path="model")
         mlflow.log_metric("best_val_acc", best_val_acc)
 
+        # Log training time in HH:MM:SS format
+        elapsed = time.time() - start_time
+        training_time = str(datetime.timedelta(seconds=int(elapsed)))
+        mlflow.log_param("training_time", training_time)
+
+        # Log training history plot
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_hist:
+            _plot_and_save_training_history(history, tmp_hist.name)
+            mlflow.log_artifact(tmp_hist.name, artifact_path="plots")
+            os.unlink(tmp_hist.name)
+
+        # Log validation confusion matrix
+        if class_names is not None:
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_cm:
+                _plot_and_save_confusion_matrix(
+                    best_val_labels, best_val_preds, class_names, tmp_cm.name
+                )
+                mlflow.log_artifact(tmp_cm.name, artifact_path="plots")
+                os.unlink(tmp_cm.name)
+
     return model, history
 
 
+def _plot_and_save_training_history(history: dict, filepath: str):
+    """Plot training history (loss and accuracy) and save as PNG.
+
+    Args:
+        history (dict): History dict with keys train_loss, val_loss, train_acc, val_acc.
+        filepath (str): Path to save the PNG file.
+    """
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+    epochs = range(1, len(history["train_loss"]) + 1)
+
+    axes[0].plot(epochs, history["train_loss"], label="Train", marker="o")
+    axes[0].plot(epochs, history["val_loss"], label="Val", marker="s")
+    axes[0].set_xlabel("Epoch")
+    axes[0].set_ylabel("Loss")
+    axes[0].set_title("Training & Validation Loss")
+    axes[0].legend()
+    axes[0].grid(True, alpha=0.3)
+
+    axes[1].plot(epochs, history["train_acc"], label="Train", marker="o")
+    axes[1].plot(epochs, history["val_acc"], label="Val", marker="s")
+    axes[1].set_xlabel("Epoch")
+    axes[1].set_ylabel("Accuracy")
+    axes[1].set_title("Training & Validation Accuracy")
+    axes[1].legend()
+    axes[1].grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(filepath, dpi=100, bbox_inches="tight")
+    plt.close()
+
+
+def _plot_and_save_confusion_matrix(labels: list, preds: list, class_names: list,
+                                    filepath: str):
+    """Plot confusion matrix and save as PNG.
+
+    Args:
+        labels (list): True labels.
+        preds (list): Predicted labels.
+        class_names (list): Human-readable class names.
+        filepath (str): Path to save the PNG file.
+    """
+    cm = confusion_matrix(labels, preds)
+    fig, ax = plt.subplots(figsize=(8, 6))
+
+    im = ax.imshow(cm, interpolation="nearest", cmap=plt.cm.Blues)
+    ax.set_title("Confusion Matrix (Validation Set)")
+    ax.set_xlabel("Predicted")
+    ax.set_ylabel("True")
+    ax.set_xticks(range(len(class_names)))
+    ax.set_yticks(range(len(class_names)))
+    ax.set_xticklabels(class_names, rotation=45, ha="right")
+    ax.set_yticklabels(class_names)
+
+    for i in range(cm.shape[0]):
+        for j in range(cm.shape[1]):
+            ax.text(j, i, str(cm[i, j]),
+                    ha="center", va="center",
+                    color="white" if cm[i, j] > cm.max() / 2 else "black",
+                    fontsize=11)
+
+    plt.colorbar(im, ax=ax)
+    plt.tight_layout()
+    plt.savefig(filepath, dpi=100, bbox_inches="tight")
+    plt.close()
+
+
 def evaluate_and_log(model, test_loader, device, class_names: list,
-                     scheme: str, task: str):
-    """Evaluate model on test set, print report, and log metrics to MLflow.
+                     scheme: str, task: str, run_name: str = None):
+    """Evaluate model on test set, log metrics to MLflow, and print report.
 
     Computes accuracy, macro F1, and classification report on the test set.
-    Logs test metrics as MLflow tags (outside of training run context).
+    Logs test metrics and confusion matrix artifact to MLflow (in a nested run if run_name provided).
 
     Args:
         model (nn.Module): Trained model.
@@ -524,6 +636,7 @@ def evaluate_and_log(model, test_loader, device, class_names: list,
         class_names (list[str]): Human-readable class names.
         scheme (str): Scheme identifier for display.
         task (str): Task identifier for display.
+        run_name (str): MLflow run name for logging test metrics. If None, no MLflow logging.
 
     Returns:
         dict: Dictionary with keys 'accuracy', 'f1', 'preds', 'labels'.
@@ -536,6 +649,20 @@ def evaluate_and_log(model, test_loader, device, class_names: list,
     print(f"Accuracy : {acc:.4f}")
     print(f"Macro F1 : {f1:.4f}")
     print(classification_report(labels, preds, target_names=class_names, zero_division=0))
+
+    # Log test metrics to MLflow if run_name is provided
+    if run_name is not None:
+        with mlflow.start_run(run_name=run_name, nested=True):
+            mlflow.log_metrics({
+                "test_accuracy": acc,
+                "test_f1_macro": f1,
+            })
+
+            # Log test confusion matrix
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_cm:
+                _plot_and_save_confusion_matrix(labels, preds, class_names, tmp_cm.name)
+                mlflow.log_artifact(tmp_cm.name, artifact_path="plots")
+                os.unlink(tmp_cm.name)
 
     return {"accuracy": acc, "f1": f1, "preds": preds, "labels": labels}
 
