@@ -40,3 +40,8 @@ class Config:
         5: "lead_II",  6: "a_VL",  7: "v_2",  8: "v5",
         9: "lead_III", 10: "a_VF", 11: "v_3", 12: "v_6"
     }
+
+    dagshub_config: dict = {
+        "repo_owner": "abiyamf",
+        "repo_name": "TelUxMMU-Research",
+    }
