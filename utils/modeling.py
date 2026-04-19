@@ -1,7 +1,7 @@
 import os
 import time
 import tempfile
-from datetime import datetime
+from datetime import datetime, timedelta
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -545,7 +545,7 @@ def train_model(model, train_loader, val_loader, num_epochs: int,
 
         # Log training time in HH:MM:SS format
         elapsed = time.time() - start_time
-        training_time = str(datetime.timedelta(seconds=int(elapsed)))
+        training_time = str(timedelta(seconds=int(elapsed)))
         mlflow.log_param("training_time", training_time)
 
         # Log training history plot
