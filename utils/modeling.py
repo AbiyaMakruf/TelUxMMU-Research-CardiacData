@@ -77,6 +77,8 @@ SCHEME_NAMES = {
     "scheme1": "Skema 1 – Gambar Clean",
     "scheme2": "Skema 2 – 12 Short Lead + Long Lead",
     "scheme3": "Skema 3 – 6 Tungkai + 6 Precordial + Long Lead",
+    "raw": "Raw – Tanpa Preprocessing",
+    "longlead": "Long Lead – Lead II (preprocessed)",
 }
 
 
@@ -170,6 +172,58 @@ def _get_image_files_scheme3(data_root: str):
             where lead_dict contains only the 13 relevant lead paths.
     """
     return _get_image_files_scheme2(data_root)
+
+
+def _get_image_files_raw(data_root: str):
+    """Collect (image_path, folder_name) pairs for raw (unpreprocessed) images.
+
+    Walks through data_root/raw/ and collects all image files along with
+    their class folder name. Images are original, unpreprocessed ECG scans.
+
+    Args:
+        data_root (str): Root data directory (e.g. 'data').
+
+    Returns:
+        list[tuple[str, str]]: List of (absolute_image_path, class_folder_name).
+    """
+    base = os.path.join(data_root, "raw")
+    records = []
+    for cls_folder in sorted(os.listdir(base)):
+        cls_path = os.path.join(base, cls_folder)
+        if not os.path.isdir(cls_path):
+            continue
+        for fname in os.listdir(cls_path):
+            if fname.lower().endswith((".png", ".jpg", ".jpeg")):
+                records.append((os.path.join(cls_path, fname), cls_folder))
+    return records
+
+
+def _get_image_files_longlead(data_root: str):
+    """Collect (image_path, folder_name) pairs for long lead images only.
+
+    Walks through data_root/preprocessed/cropped_leads/ and collects only
+    the long lead image (13_long_lead.png) for each sample.
+
+    Args:
+        data_root (str): Root data directory (e.g. 'data').
+
+    Returns:
+        list[tuple[str, str]]: List of (absolute_image_path, class_folder_name).
+    """
+    base = os.path.join(data_root, "preprocessed", "cropped_leads")
+    records = []
+    for cls_folder in sorted(os.listdir(base)):
+        cls_path = os.path.join(base, cls_folder)
+        if not os.path.isdir(cls_path):
+            continue
+        for sample in sorted(os.listdir(cls_path)):
+            sample_path = os.path.join(cls_path, sample)
+            if not os.path.isdir(sample_path):
+                continue
+            long_lead_path = os.path.join(sample_path, "13_long_lead.png")
+            if os.path.exists(long_lead_path):
+                records.append((long_lead_path, cls_folder))
+    return records
 
 
 # ---------------------------------------------------------------------------
@@ -300,6 +354,62 @@ class ECGDatasetScheme3(Dataset):
         tensor_long       = _load_group([LONG_LEAD_PREFIX])         # (3,  H, W)
 
         return (tensor_limb, tensor_precordial, tensor_long), label
+
+
+class ECGDatasetRaw(Dataset):
+    """PyTorch Dataset for raw (unpreprocessed) ECG images.
+
+    Loads raw ECG images from the raw/ folder and assigns label based
+    on task type (2-class or 4-class).
+
+    Args:
+        records (list[tuple[str, str]]): Output of _get_image_files_raw().
+        task (str): '2class' or '4class'.
+        image_size (int): Target image size. Defaults to 224.
+    """
+
+    def __init__(self, records, task: str = "4class", image_size: int = 224):
+        self.records = records
+        self.label_map = LABEL_2CLASS if task == "2class" else LABEL_4CLASS
+        self.transform = _build_transform(image_size)
+
+    def __len__(self):
+        return len(self.records)
+
+    def __getitem__(self, idx):
+        img_path, cls_folder = self.records[idx]
+        img = Image.open(img_path).convert("RGB")
+        img = self.transform(img)
+        label = self.label_map[cls_folder]
+        return img, label
+
+
+class ECGDatasetLongLead(Dataset):
+    """PyTorch Dataset for long lead images only (preprocessed).
+
+    Loads only the long lead image (13_long_lead.png) per sample and assigns
+    label based on task type (2-class or 4-class).
+
+    Args:
+        records (list[tuple[str, str]]): Output of _get_image_files_longlead().
+        task (str): '2class' or '4class'.
+        image_size (int): Target image size. Defaults to 224.
+    """
+
+    def __init__(self, records, task: str = "4class", image_size: int = 224):
+        self.records = records
+        self.label_map = LABEL_2CLASS if task == "2class" else LABEL_4CLASS
+        self.transform = _build_transform(image_size)
+
+    def __len__(self):
+        return len(self.records)
+
+    def __getitem__(self, idx):
+        img_path, cls_folder = self.records[idx]
+        img = Image.open(img_path).convert("RGB")
+        img = self.transform(img)
+        label = self.label_map[cls_folder]
+        return img, label
 
 
 # ---------------------------------------------------------------------------
