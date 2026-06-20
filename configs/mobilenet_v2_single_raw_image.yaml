@@ -1,0 +1,7 @@
+_base_: configs/default.yaml
+run:
+  run_name: mobilenet_v2_single_raw_image
+data:
+  input_scheme: single_raw_image
+model:
+  model_name: mobilenet_v2

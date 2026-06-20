@@ -2,3 +2,7 @@ data/
 ecg-miner/
 *__pycache__/
 outputs/
+runs/
+training.log
+*.pt
+*.pth
