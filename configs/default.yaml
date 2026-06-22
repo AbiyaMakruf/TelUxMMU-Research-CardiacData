@@ -15,6 +15,7 @@ data:
   test_ratio: 0.15
   stratified_split: true
   max_samples: null
+  max_samples_percent: null
   num_classes: 4
   class_names:
     - Normal
@@ -34,10 +35,14 @@ model:
   pretrained: true
   freeze_backbone: false
   dropout: 0.3
+  multibranch_backbone_sharing: shared
+  multibranch_shared_in_channels: 3
+  multibranch_branch_projection_dim: 512
+  multibranch_use_branch_heads: true
 
 training:
   epochs: 50
-  batch_size: 32
+  batch_size: 8
   learning_rate: 0.0001
   min_learning_rate: 0.000001
   weight_decay: 0.00001
@@ -46,6 +51,7 @@ training:
   early_stopping: false
   patience: 10
   monitor_metric: val_macro_f1
+  checkpoint_interval: 10
 
 runtime:
   device: auto

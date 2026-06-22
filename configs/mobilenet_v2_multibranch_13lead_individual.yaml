@@ -1,0 +1,7 @@
+_base_: configs/default.yaml
+run:
+  run_name: mobilenet_v2_multibranch_13lead_individual
+data:
+  input_scheme: multibranch_13lead_individual
+model:
+  model_name: mobilenet_v2

@@ -1,0 +1,7 @@
+_base_: configs/default.yaml
+run:
+  run_name: mobilenet_v2_multibranch_6lead_6lead_longlead
+data:
+  input_scheme: multibranch_6lead_6lead_longlead
+model:
+  model_name: mobilenet_v2

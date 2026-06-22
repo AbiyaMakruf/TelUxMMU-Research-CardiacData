@@ -1,0 +1,7 @@
+_base_: configs/default.yaml
+run:
+  run_name: mobilenet_v2_single_12_lead
+data:
+  input_scheme: single_12_lead
+model:
+  model_name: mobilenet_v2

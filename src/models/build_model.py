@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from src.models.multibranch import build_multibranch_model
 from src.models.single_input import build_single_input_model
-from src.models.stacked import build_stacked_model
+from src.models.stacked import build_stacked_lead_sequence_model, build_stacked_model
 
 
 def infer_input_shape(input_scheme: str):
@@ -10,8 +10,10 @@ def infer_input_shape(input_scheme: str):
         return "single", 3
     if input_scheme == "single_12_lead":
         return "single", 36
-    if input_scheme in {"stacked_12lead_longlead", "stacked_6lead_6lead_longlead", "stacked_13lead_individual"}:
+    if input_scheme in {"stacked_12lead_longlead", "stacked_6lead_6lead_longlead"}:
         return "stacked", 39
+    if input_scheme == "stacked_13lead_individual":
+        return "stacked_sequence", 13
     if input_scheme == "multibranch_12lead_longlead":
         return "multibranch", [36, 3]
     if input_scheme == "multibranch_6lead_6lead_longlead":
@@ -29,4 +31,6 @@ def build_model(config: dict):
         return build_single_input_model(config, shape, num_classes)
     if kind == "stacked":
         return build_stacked_model(config, shape, num_classes)
+    if kind == "stacked_sequence":
+        return build_stacked_lead_sequence_model(config, shape, num_classes)
     return build_multibranch_model(config, shape, num_classes)

@@ -41,6 +41,32 @@ def count_model_parameters(model) -> dict:
     return {"total": total, "trainable": trainable, "frozen": total - trainable}
 
 
+def apply_resume_architecture_compatibility(config: dict, run_dir: Path, logger) -> None:
+    if not str(config["data"].get("input_scheme", "")).startswith("multibranch_"):
+        return
+    latest_checkpoint_path = run_dir / "checkpoints" / "latest.pt"
+    if not latest_checkpoint_path.exists():
+        return
+    try:
+        checkpoint = torch.load(latest_checkpoint_path, map_location="cpu", weights_only=False)
+    except TypeError:
+        checkpoint = torch.load(latest_checkpoint_path, map_location="cpu")
+    except Exception as exc:
+        logger.warning("resume_architecture_compatibility skipped checkpoint=%s error=%s", latest_checkpoint_path, exc)
+        return
+
+    state_keys = checkpoint.get("model_state", {}).keys()
+    model_cfg = config.setdefault("model", {})
+    if any(key.startswith("branches.") for key in state_keys):
+        model_cfg["multibranch_backbone_sharing"] = "independent"
+        logger.info("resume_architecture_compatibility=independent checkpoint=%s", latest_checkpoint_path)
+    elif any(key.startswith("backbone.") for key in state_keys):
+        model_cfg["multibranch_backbone_sharing"] = "shared"
+        if not any(key.startswith("branch_heads.") for key in state_keys):
+            model_cfg["multibranch_use_branch_heads"] = False
+            logger.info("resume_architecture_compatibility=shared_legacy checkpoint=%s", latest_checkpoint_path)
+
+
 def save_run_summary(run_dir: Path, config: dict, discovery: dict, train_summary: dict | None, test_summary: dict | None) -> None:
     lines = [
         "# Run Summary",
@@ -50,6 +76,7 @@ def save_run_summary(run_dir: Path, config: dict, discovery: dict, train_summary
         f"- Mode: {config['run'].get('mode')}",
         f"- Model: {config['model'].get('model_name')}",
         f"- Input scheme: {config['data'].get('input_scheme')}",
+        f"- Multibranch backbone sharing: {config['model'].get('multibranch_backbone_sharing')}",
         f"- Number of classes: {config['data'].get('num_classes')}",
         f"- Class names: {', '.join(config['data'].get('class_names', []))}",
         "",
@@ -57,7 +84,7 @@ def save_run_summary(run_dir: Path, config: dict, discovery: dict, train_summary
         f"- Data directory: {config['data'].get('data_dir')}",
         f"- Detected structure: {discovery.get('structure_type')}",
         f"- Number of samples: {discovery.get('number_of_samples')}",
-        f"- Split strategy: stratified 70/15/15 unless overridden",
+        f"- Split strategy: stratified group split by input hash, ratio {config['data'].get('train_ratio')}/{config['data'].get('val_ratio')}/{config['data'].get('test_ratio')}",
         "",
         "## Training Configuration",
         f"- Epochs: {config['training'].get('epochs')}",
@@ -118,6 +145,7 @@ def main(argv: list[str] | None = None) -> int:
     training_logger = setup_training_logger(run_dir)
 
     try:
+        apply_resume_architecture_compatibility(config, run_dir, logger)
         logger.info("run_dir=%s", run_dir)
         training_logger.info("latest_training_log=training.log")
         training_logger.info("run_dir=%s", run_dir)
@@ -171,8 +199,10 @@ def main(argv: list[str] | None = None) -> int:
         (run_dir / "artifacts" / "model_summary.txt").write_text(str(model), encoding="utf-8")
         param_counts = count_model_parameters(model)
         training_logger.info(
-            "model_ready name=%s total_params=%s trainable_params=%s frozen_params=%s",
+            "model_ready name=%s architecture=%s multibranch_backbone_sharing=%s total_params=%s trainable_params=%s frozen_params=%s",
             config["model"]["model_name"],
+            type(model).__name__,
+            config["model"].get("multibranch_backbone_sharing"),
             param_counts["total"],
             param_counts["trainable"],
             param_counts["frozen"],
@@ -192,7 +222,8 @@ def main(argv: list[str] | None = None) -> int:
         if mode in {"train_eval", "eval_only"}:
             training_logger.info("evaluation_phase=start split=test")
             criterion = torch.nn.CrossEntropyLoss()
-            result = evaluate_model(model, test_loader, criterion, device)
+            use_mixed_precision = bool(config.get("runtime", {}).get("mixed_precision", False)) and device.type == "cuda"
+            result = evaluate_model(model, test_loader, criterion, device, use_mixed_precision=use_mixed_precision)
             test_summary = save_evaluation_outputs(result, config["data"]["class_names"], run_dir, split_name="test")
             training_logger.info("evaluation_phase=finish test_metrics=%s", test_summary)
 

@@ -27,10 +27,15 @@ TeluxMMU/
 │   ├── modeling_resnet18.ipynb
 │   └── modeling_multi_backbone.ipynb
 ├── scripts/
-│   ├── run_nohup.sh
-│   ├── train_eval.sh
+│   ├── run_preprocessing_notebook.sh
+│   ├── train_mobilenet.sh
+│   ├── train_efficientnet.sh
+│   ├── train_resnet.sh
+│   ├── train_densenet.sh
 │   ├── eval_only.sh
-│   └── inference_only.sh
+│   ├── inference_only.sh
+│   ├── rank_runs.sh
+│   └── _full_training_model.sh
 ├── src/
 │   ├── runner.py
 │   ├── config.py
@@ -302,10 +307,13 @@ File yang dibuat:
 
 ```text
 src/runner.py
-scripts/run_nohup.sh
-scripts/train_eval.sh
+scripts/train_mobilenet.sh
+scripts/train_efficientnet.sh
+scripts/train_resnet.sh
+scripts/train_densenet.sh
 scripts/eval_only.sh
 scripts/inference_only.sh
+scripts/rank_runs.sh
 ```
 
 Mode yang harus tersedia:
@@ -323,10 +331,10 @@ Command minimal yang harus lolos:
 uv run python -m src.runner --mode train_eval --config configs/default.yaml
 ```
 
-Nohup minimal:
+Wrapper minimal:
 
 ```bash
-bash scripts/run_nohup.sh
+bash scripts/train_mobilenet.sh --foreground --epochs 1 --max-samples-percent 5
 ```
 
 Terminal output harus ringkas. Log detail masuk ke:

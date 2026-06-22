@@ -16,7 +16,7 @@ def move_inputs_to_device(inputs, device):
     return inputs.to(device)
 
 
-def evaluate_model(model, loader, criterion, device):
+def evaluate_model(model, loader, criterion, device, use_mixed_precision: bool = False):
     model.eval()
     total_loss = 0.0
     total = 0
@@ -28,9 +28,10 @@ def evaluate_model(model, loader, criterion, device):
         for inputs, labels, sample_ids in loader:
             labels = labels.to(device)
             inputs = move_inputs_to_device(inputs, device)
-            outputs = model(inputs)
-            loss = criterion(outputs, labels)
-            probs = torch.softmax(outputs, dim=1)
+            with torch.amp.autocast(device_type="cuda", enabled=use_mixed_precision and getattr(device, "type", str(device)) == "cuda"):
+                outputs = model(inputs)
+                loss = criterion(outputs, labels)
+                probs = torch.softmax(outputs, dim=1)
 
             batch_size = labels.size(0)
             total_loss += loss.item() * batch_size

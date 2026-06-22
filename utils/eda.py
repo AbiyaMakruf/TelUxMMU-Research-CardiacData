@@ -16,8 +16,7 @@ def download_and_extract_dataset(url, zip_name, data_path):
         zip_name (str): Name of the zip file to create/use.
         data_path (str): Path where the zip will be saved and extracted.
     """
-    os.makedirs("data", exist_ok=True)
-    os.makedirs("data/raw", exist_ok=True)
+    os.makedirs(data_path, exist_ok=True)
 
     if not os.path.exists(os.path.join(data_path, zip_name)):
         print(f"Downloading dataset from {url}...")

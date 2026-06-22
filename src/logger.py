@@ -38,8 +38,8 @@ def setup_training_logger(run_dir: str | Path, root_log_path: str | Path = "trai
     logger.propagate = False
 
     formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
-    for path in [Path(root_log_path), logs_dir / "training.log"]:
-        file_handler = logging.FileHandler(path, mode="w", encoding="utf-8")
+    for path, mode in [(Path(root_log_path), "w"), (logs_dir / "training.log", "a")]:
+        file_handler = logging.FileHandler(path, mode=mode, encoding="utf-8")
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
     return logger

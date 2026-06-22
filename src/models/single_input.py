@@ -1,11 +1,10 @@
-from src.models.mobilenet_v2 import MobileNetV2Classifier
+from src.models.backbones import build_classifier
 
 
 def build_single_input_model(config: dict, in_channels: int, num_classes: int):
     model_cfg = config["model"]
-    if model_cfg["model_name"] != "mobilenet_v2":
-        raise ValueError(f"Unsupported model_name: {model_cfg['model_name']}")
-    return MobileNetV2Classifier(
+    return build_classifier(
+        model_name=model_cfg["model_name"],
         num_classes=num_classes,
         in_channels=in_channels,
         pretrained=model_cfg["pretrained"],
