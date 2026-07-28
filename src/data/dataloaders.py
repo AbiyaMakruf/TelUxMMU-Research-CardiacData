@@ -190,3 +190,23 @@ def build_dataloaders(rows: list[dict], config: dict, run_dir: str | Path):
         DataLoader(Subset(dataset, idx_test), shuffle=False, **loader_kwargs),
         dataset,
     )
+
+
+def build_all_data_loader(rows: list[dict], config: dict):
+    data_cfg = config["data"]
+    train_cfg = config["training"]
+    runtime_cfg = config["runtime"]
+
+    rows = _subset_rows(rows, data_cfg.get("max_samples"), data_cfg.get("max_samples_percent"))
+    dataset = ECGManifestDataset(
+        rows=rows,
+        class_names=data_cfg["class_names"],
+        input_scheme=data_cfg["input_scheme"],
+        image_size=data_cfg["image_size"],
+    )
+    loader_kwargs = {
+        "batch_size": train_cfg["batch_size"],
+        "num_workers": runtime_cfg["num_workers"],
+        "pin_memory": False,
+    }
+    return DataLoader(dataset, shuffle=False, **loader_kwargs), dataset

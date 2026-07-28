@@ -19,6 +19,7 @@ METRIC_COLUMNS = [
     "macro_precision",
     "macro_recall",
     "test_loss",
+    "all_data_loss",
 ]
 
 OUTPUT_COLUMNS = [
@@ -77,8 +78,8 @@ def safe_float(value):
         return None
 
 
-def discover_metric_files(runs_root: Path) -> list[Path]:
-    return sorted(runs_root.rglob("metrics/test_metrics.json"))
+def discover_metric_files(runs_root: Path, metrics_filename: str) -> list[Path]:
+    return sorted(runs_root.rglob(f"metrics/{metrics_filename}"))
 
 
 def load_run_row(metrics_path: Path, runs_root: Path) -> dict:
@@ -92,6 +93,12 @@ def load_run_row(metrics_path: Path, runs_root: Path) -> dict:
     data_cfg = config.get("data", {})
     train_cfg = config.get("training", {})
     run_cfg = config.get("run", {})
+    split_name = metrics_path.name.removesuffix("_metrics.json")
+    confusion_matrix_path = run_dir / "metrics" / f"{split_name}_confusion_matrix.csv"
+    confusion_matrix_image_path = run_dir / "plots" / f"{split_name}_confusion_matrix.png"
+    if split_name == "test" and not confusion_matrix_path.exists():
+        confusion_matrix_path = run_dir / "metrics" / "confusion_matrix.csv"
+        confusion_matrix_image_path = run_dir / "plots" / "confusion_matrix.png"
 
     row = {
         "model_name": model_cfg.get("model_name") or infer_model_name_from_path(run_dir),
@@ -111,8 +118,8 @@ def load_run_row(metrics_path: Path, runs_root: Path) -> dict:
         "early_stopping": train_cfg.get("early_stopping"),
         "checkpoint_interval": train_cfg.get("checkpoint_interval"),
         "metrics_path": str(metrics_path),
-        "confusion_matrix_path": str(run_dir / "metrics" / "confusion_matrix.csv"),
-        "confusion_matrix_image_path": str(run_dir / "plots" / "confusion_matrix.png"),
+        "confusion_matrix_path": str(confusion_matrix_path),
+        "confusion_matrix_image_path": str(confusion_matrix_image_path),
     }
     for metric in METRIC_COLUMNS:
         row[metric] = safe_float(metrics.get(metric))
@@ -349,6 +356,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--runs_root", default="runs", help="Root folder that contains run outputs.")
     parser.add_argument("--output_dir", default="summary/run_rankings", help="Folder for CSV and Markdown reports.")
     parser.add_argument("--top_n", type=int, default=20, help="Number of rows shown in Markdown top tables.")
+    parser.add_argument("--metrics_filename", default="test_metrics.json", help="Metric filename under each run's metrics/ folder.")
     return parser.parse_args()
 
 
@@ -356,7 +364,7 @@ def main() -> int:
     args = parse_args()
     runs_root = Path(args.runs_root)
     output_dir = Path(args.output_dir)
-    metric_files = discover_metric_files(runs_root)
+    metric_files = discover_metric_files(runs_root, args.metrics_filename)
     rows = [load_run_row(path, runs_root) for path in metric_files]
     rows = add_ranks(rows)
     model_summary = build_model_summary(rows)

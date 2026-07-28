@@ -8,7 +8,7 @@ import torch
 
 from src.config import apply_cli_overrides, build_arg_parser, load_config
 from src.data.data_discovery import build_manifest, discover_data, save_discovery_outputs
-from src.data.dataloaders import build_dataloaders
+from src.data.dataloaders import build_all_data_loader, build_dataloaders
 from src.engine.evaluate import evaluate_model, save_evaluation_outputs
 from src.engine.inference import run_inference
 from src.engine.train import train_model
@@ -184,6 +184,44 @@ def main(argv: list[str] | None = None) -> int:
             rows = run_inference(config, checkpoint_path, run_dir / "metrics" / "predictions.csv", device)
             logger.info("inference complete samples=%s", len(rows))
             save_run_summary(run_dir, config, discovery, None, None)
+            return 0
+
+        if mode == "eval_all_data":
+            all_loader, _dataset = build_all_data_loader(manifest, config)
+            training_logger.info(
+                "data_loader_phase=all_data_ready all_batches=%s all_samples=%s batch_size=%s num_workers=%s split_strategy=none",
+                len(all_loader),
+                len(_dataset),
+                config["training"]["batch_size"],
+                config["runtime"]["num_workers"],
+            )
+            model = build_model(config).to(device)
+            (run_dir / "artifacts" / "model_summary.txt").write_text(str(model), encoding="utf-8")
+            param_counts = count_model_parameters(model)
+            training_logger.info(
+                "model_ready name=%s architecture=%s multibranch_backbone_sharing=%s total_params=%s trainable_params=%s frozen_params=%s",
+                config["model"]["model_name"],
+                type(model).__name__,
+                config["model"].get("multibranch_backbone_sharing"),
+                param_counts["total"],
+                param_counts["trainable"],
+                param_counts["frozen"],
+            )
+            checkpoint_path = config["run"].get("checkpoint_path")
+            if not checkpoint_path:
+                raise ValueError("--checkpoint_path is required for eval_all_data")
+            training_logger.info("eval_all_data_load_checkpoint=%s", checkpoint_path)
+            checkpoint = torch.load(checkpoint_path, map_location=device)
+            model.load_state_dict(checkpoint["model_state"])
+            training_logger.info("evaluation_phase=start split=all_data samples=%s", len(_dataset))
+            criterion = torch.nn.CrossEntropyLoss()
+            use_mixed_precision = bool(config.get("runtime", {}).get("mixed_precision", False)) and device.type == "cuda"
+            result = evaluate_model(model, all_loader, criterion, device, use_mixed_precision=use_mixed_precision)
+            test_summary = save_evaluation_outputs(result, config["data"]["class_names"], run_dir, split_name="all_data")
+            training_logger.info("evaluation_phase=finish all_data_metrics=%s", test_summary)
+            save_run_summary(run_dir, config, discovery, train_summary, test_summary)
+            training_logger.info("training_log_finish=%s", datetime.now().isoformat(timespec="seconds"))
+            logger.info("run complete")
             return 0
 
         train_loader, val_loader, test_loader, _dataset = build_dataloaders(manifest, config, run_dir)

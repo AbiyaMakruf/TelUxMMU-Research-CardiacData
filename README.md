@@ -329,6 +329,41 @@ stacked_6lead_6lead_longlead
 stacked_13lead_individual
 ```
 
+Visualisasi perbedaan skema:
+
+```mermaid
+flowchart TB
+    ECG["Data ECG per sampel"] --> FullImage["Gambar penuh"]
+    ECG --> LeadImages["Gambar lead individual"]
+
+    FullImage --> Raw["single_raw_image<br/>raw_image_path<br/>3 channel"]
+    FullImage --> Clean["single_clean_image<br/>clean_image_path<br/>3 channel"]
+
+    LeadImages --> LongOnly["single_long_lead_ii<br/>long lead II<br/>3 channel"]
+    LeadImages --> Short12Single["single_12_lead<br/>12 lead pendek<br/>36 channel"]
+
+    LeadImages --> MB12Long["multibranch_12lead_longlead<br/>branch: 12 lead pendek + long lead<br/>36 + 3 channel"]
+    LeadImages --> MB6Long["multibranch_6lead_6lead_longlead<br/>branch: limb + precordial + long lead<br/>18 + 18 + 3 channel"]
+    LeadImages --> MB13["multibranch_13lead_individual<br/>13 branch lead individual<br/>masing-masing 3 channel"]
+
+    LeadImages --> Stack12Long["stacked_12lead_longlead<br/>12 lead pendek + long lead<br/>39 channel"]
+    LeadImages --> Stack6Long["stacked_6lead_6lead_longlead<br/>limb + precordial + long lead<br/>39 channel"]
+    LeadImages --> Stack13["stacked_13lead_individual<br/>sequence 13 lead<br/>13 x 3 channel"]
+
+    Raw --> SingleBackbone["Single backbone"]
+    Clean --> SingleBackbone
+    LongOnly --> SingleBackbone
+    Short12Single --> SingleBackbone
+
+    MB12Long --> BranchFusion["Feature per branch<br/>digabung sebelum classifier"]
+    MB6Long --> BranchFusion
+    MB13 --> BranchFusion
+
+    Stack12Long --> StackedBackbone["Satu jalur stacked<br/>atau stacked sequence"]
+    Stack6Long --> StackedBackbone
+    Stack13 --> StackedBackbone
+```
+
 Wrapper per keluarga model:
 
 ```bash

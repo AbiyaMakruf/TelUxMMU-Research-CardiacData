@@ -70,7 +70,7 @@ def apply_cli_overrides(config: dict, args: argparse.Namespace) -> dict:
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="ECG disease classification pipeline")
     parser.add_argument("--config", default="configs/default.yaml")
-    parser.add_argument("--mode", choices=["train_eval", "train_only", "eval_only", "inference_only"])
+    parser.add_argument("--mode", choices=["train_eval", "train_only", "eval_only", "eval_all_data", "inference_only"])
     parser.add_argument("--run_name", "--run-name", dest="run_name")
     parser.add_argument("--model_name", "--model-name", dest="model_name")
     parser.add_argument("--input_scheme", "--input-scheme", dest="input_scheme")

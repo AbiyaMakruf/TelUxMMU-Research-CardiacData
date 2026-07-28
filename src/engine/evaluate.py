@@ -60,14 +60,24 @@ def save_evaluation_outputs(result: dict, class_names: list[str], run_dir: str |
     summary[f"{split_name}_loss"] = float(result["loss"])
     write_json(summary, metrics_dir / f"{split_name}_metrics.json")
     write_csv([summary], metrics_dir / f"{split_name}_metrics.csv")
-    write_csv(per_class, metrics_dir / "per_class_metrics.csv")
+    write_csv(per_class, metrics_dir / f"{split_name}_per_class_metrics.csv")
+    if split_name == "test":
+        write_csv(per_class, metrics_dir / "per_class_metrics.csv")
     save_confusion_matrix(
         result["labels"],
         result["preds"],
         class_names,
-        metrics_dir / "confusion_matrix.csv",
-        plots_dir / "confusion_matrix.png",
+        metrics_dir / f"{split_name}_confusion_matrix.csv",
+        plots_dir / f"{split_name}_confusion_matrix.png",
     )
+    if split_name == "test":
+        save_confusion_matrix(
+            result["labels"],
+            result["preds"],
+            class_names,
+            metrics_dir / "confusion_matrix.csv",
+            plots_dir / "confusion_matrix.png",
+        )
 
     probs = result["probs"]
     prediction_rows = []
@@ -82,5 +92,7 @@ def save_evaluation_outputs(result: dict, class_names: list[str], run_dir: str |
         for class_index, class_name in enumerate(class_names):
             row[f"prob_{class_name}"] = float(probs[i][class_index]) if len(probs) else 0.0
         prediction_rows.append(row)
-    write_csv(prediction_rows, metrics_dir / "predictions.csv")
+    write_csv(prediction_rows, metrics_dir / f"{split_name}_predictions.csv")
+    if split_name == "test":
+        write_csv(prediction_rows, metrics_dir / "predictions.csv")
     return summary
